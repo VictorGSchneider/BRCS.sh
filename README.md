@@ -1,6 +1,7 @@
-# 🛠️ Linux System Maintenance CLI
+# 🛠️ BRCS.sh, a Linux System Maintenance CLI
 
 A handy command-line tool to back up and restore Linux system configurations, clean up unnecessary files, and schedule automatic maintenance at system startup.
+BRCS is a acronym for Backup, Restoration, Cleaner and Schedule.
 
 ## 📦 Features
 
