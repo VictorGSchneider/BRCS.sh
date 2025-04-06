@@ -22,11 +22,12 @@ A handy command-line tool to back up and restore Linux system configurations, cl
 - `flatpak` *(optional)*
 - `snapd` *(optional)*
 
+### Install missing tools via:
+`sudo apt install zip unzip locate deborphan localepurge flatpak`
+
 ## 🚀 How to Use
 
-1. Clone the repository:
-`git clone https://github.com/yourusername/linux-maintenance-cli.git
-cd linux-maintenance-cli`
+1. Download the file:
 
 2. Make the script executable:
 `chmod +x manutencao.sh`
