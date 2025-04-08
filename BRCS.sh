@@ -121,7 +121,7 @@ restaurar_tudo() {
 
 limpeza_completa() {
     echo "🧹 Starting full cleanup..."
-    steps=("apt clean" "autoclean" "autoremove" "deborphan" "localepurge" "snap" "flatpak" "steam")
+    steps=("apt update" "apt clean" "autoclean" "autoremove" "deborphan" "localepurge" "snap" "flatpak" "steam")
     total=${#steps[@]}
     count=0
 
