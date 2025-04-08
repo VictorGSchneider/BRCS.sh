@@ -125,6 +125,9 @@ limpeza_completa() {
     total=${#steps[@]}
     count=0
 
+    sudo apt-get update && upgrade
+    count=$((count+1)); progress_bar "$total" "$count"
+
     sudo apt-get clean
     count=$((count+1)); progress_bar "$total" "$count"
 
