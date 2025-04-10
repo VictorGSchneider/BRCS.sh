@@ -31,10 +31,10 @@ BRCS is a acronym for Backup, Restoration, Cleaner and Schedule.
 1. Download the file:
 
 2. Make the script executable:
-`chmod +x manutencao.sh`
+`chmod +x BRCS.sh`
 
 3. Run it:
-`./manutencao.sh`
+`./BRCS.sh`
 
 4. Follow the interactive menu.
 ```
