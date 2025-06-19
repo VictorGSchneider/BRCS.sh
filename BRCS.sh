@@ -194,6 +194,9 @@ schedule_cleanup() {
 
 # 📋 Interactive Terminal Menu
 
+# Skip menu when sourced by tests or other scripts
+[[ "${BASH_SOURCE[0]}" != "${0}" ]] && return
+
 # Handle --limpeza for cron execution
 if [ "$1" == "--limpeza" ]; then
     limpeza_completa
