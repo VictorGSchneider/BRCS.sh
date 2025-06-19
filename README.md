@@ -69,3 +69,13 @@ Logs are saved to `~/backup_YYYYMMDD.log`
 ## 📜 License
 
 This project is licensed under the terms of the [GNU General Public License v3.0](LICENSE).
+
+## Contributing
+
+To run the test suite you need the [Bats](https://github.com/bats-core/bats-core) framework.
+Install it via your package manager (e.g. `sudo apt install bats`) and then execute:
+
+```bash
+bats test
+```
+
