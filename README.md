@@ -24,7 +24,7 @@ BRCS is a acronym for Backup, Restoration, Cleaner and Schedule.
 - `snapd` *(optional)*
 
 ### Install missing tools via:
-`sudo apt install zip unzip locate deborphan localepurge flatpak`
+`sudo apt install zip unzip locate deborphan localepurge flatpak snapd`
 
 ## 🚀 How to Use
 
