@@ -35,14 +35,17 @@ progress_bar() {
 
 # 💾 Function: Backup
 backup_configs() {
-    March=$(echo "$MACHTYPE" | cut -c8-13)
     echo "[+] Starting backup..."
     com1="locate"
     com2="zip"
     para="-r -9 -@"
 
     patterns=(.conf .ini .rules .sh /etc/fstab /etc/default/grub /etc/hostname)
-    [ "$March" != "redhat" ] && patterns+=(/etc/apt/sources.list*) || patterns+=(/etc/yum.repos.d/*)
+    if command -v apt >/dev/null; then
+        patterns+=(/etc/apt/sources.list*)
+    else
+        patterns+=(/etc/yum.repos.d/*)
+    fi
     total=${#patterns[@]}
     count=0
 
