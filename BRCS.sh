@@ -71,7 +71,7 @@ restaurar_configs() {
     TMPDIR=$(mktemp -d)
     unzip -o "$arquivo" -d "$TMPDIR" >/dev/null
 
-    files=( $(find "$TMPDIR" -type f) )
+    mapfile -d '' -t files < <(find "$TMPDIR" -type f -print0)
     total=${#files[@]}
     count=0
 
@@ -102,7 +102,7 @@ restaurar_tudo() {
     TMPDIR=$(mktemp -d)
     unzip -o "$arquivo" -d "$TMPDIR" >/dev/null
 
-    files=( $(find "$TMPDIR" -type f) )
+    mapfile -d '' -t files < <(find "$TMPDIR" -type f -print0)
     total=${#files[@]}
     count=0
 
@@ -163,7 +163,7 @@ limpeza_completa() {
     count=$((count+1)); progress_bar "$total" "$count"
 
         echo "🗑️ Cleaning temporary files in /tmp and /var/tmp..."
-    tmp_files=( $(find /tmp /var/tmp -type f 2>/dev/null) )
+    mapfile -d '' -t tmp_files < <(find /tmp /var/tmp -type f -print0 2>/dev/null)
     total_tmp=${#tmp_files[@]}
     count_tmp=0
 
