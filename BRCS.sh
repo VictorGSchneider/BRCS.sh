@@ -67,7 +67,7 @@ backup_configs() {
 
 # 🔁 Function: Restore (interactive)
 restaurar_configs() {
-    read -p "📦 Enter the path to the backup file (.zip): " arquivo
+    read -r -p "📦 Enter the path to the backup file (.zip): " arquivo
     [ ! -f "$arquivo" ] && echo "❌ File not found." && return
 
     TMPDIR=$(mktemp -d)
@@ -81,7 +81,7 @@ restaurar_configs() {
     for FILE in "${files[@]}"; do
         DEST="/${FILE#"$TMPDIR"/}"
         echo "Restore $DEST? [y/N]"
-        read CONF
+        read -r CONF
         if [[ "$CONF" =~ ^[Yy]$ ]]; then
             sudo mkdir -p "$(dirname "$DEST")"
             sudo cp "$FILE" "$DEST"
@@ -98,7 +98,7 @@ restaurar_configs() {
 
 # 🔁 Function: Restore all (no prompt)
 restaurar_tudo() {
-    read -p "📦 Enter the path to the backup file (.zip): " arquivo
+    read -r -p "📦 Enter the path to the backup file (.zip): " arquivo
     [ ! -f "$arquivo" ] && echo "❌ File not found." && return
 
     TMPDIR=$(mktemp -d)
@@ -151,7 +151,7 @@ limpeza_completa() {
     count=$((count+1)); progress_bar "$total" "$count"
 
     sudo snap set system refresh.retain=2
-    sudo snap list --all | awk '/disabled/{print $1, $2}' | while read snapname revision; do
+    sudo snap list --all | awk '/disabled/{print $1, $2}' | while read -r snapname revision; do
         sudo snap remove "$snapname" --revision="$revision" --purge 2>/dev/null || \
         sudo snap remove "$snapname" --purge
     done
@@ -210,7 +210,7 @@ while true; do
     echo "3️⃣  Full system cleanup"
     echo "4️⃣  Schedule cleanup at boot"
     echo "5️⃣  Exit"
-    read -p "Choose an option: " option
+    read -r -p "Choose an option: " option
 
     case "$option" in
         1) backup_configs ;;
@@ -220,7 +220,7 @@ while true; do
             echo "1 - Interactive restore"
             echo "2 - Restore all (no prompt)"
             echo "3 - Back"
-            read -p "Choose an option: " restopt
+            read -r -p "Choose an option: " restopt
             case "$restopt" in
                 1) restaurar_configs ;;
                 2) restaurar_tudo ;;
