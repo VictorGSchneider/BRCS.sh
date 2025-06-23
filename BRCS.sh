@@ -80,7 +80,7 @@ restaurar_configs() {
 
     echo "🔁 Restoring files..."
     for FILE in "${files[@]}"; do
-        DEST="/${FILE#$TMPDIR/}"
+        DEST="/${FILE#"$TMPDIR"/}"
         echo "Restore $DEST? [y/N]"
         read CONF
         if [[ "$CONF" =~ ^[Yy]$ ]]; then
@@ -111,7 +111,7 @@ restaurar_tudo() {
 
     echo "🔁 Restoring all files..."
     for FILE in "${files[@]}"; do
-        DEST="/${FILE#$TMPDIR/}"
+        DEST="/${FILE#"$TMPDIR"/}"
         sudo mkdir -p "$(dirname "$DEST")"
         sudo cp "$FILE" "$DEST"
         echo "[✅] Restored: $DEST"
