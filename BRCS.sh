@@ -51,13 +51,13 @@ backup_configs() {
 
     for pattern in "${patterns[@]}"; do
         case $pattern in
-            .conf) $com1 .conf | grep /etc/ | $com2 "$arq" $para >> "$log" ;;
-            .ini) $com1 .ini | grep /etc/ | $com2 "$arq" $para >> "$log" ;;
-            .rules) $com1 .rules | grep /etc/ | $com2 "$arq" $para >> "$log" ;;
-            .sh) $com1 .sh | grep ".sh$" | grep "$USER_DIR" | $com2 "$arq" $para >> "$log" ;;
-            /etc/fstab|/etc/default/grub|/etc/hostname) $com1 "$pattern" | $com2 "$arq" $para >> "$log" ;;
-            /etc/apt/sources.list*) $com1 $pattern | $com2 "$arq" $para >> "$log" ;;
-            /etc/yum.repos.d/*) $com1 $pattern | $com2 "$arq" $para >> "$log" ;;
+            .conf) $com1 .conf | grep /etc/ | $com2 "$arq" "$para" >> "$log" ;;
+            .ini) $com1 .ini | grep /etc/ | $com2 "$arq" "$para" >> "$log" ;;
+            .rules) $com1 .rules | grep /etc/ | $com2 "$arq" "$para" >> "$log" ;;
+            .sh) $com1 .sh | grep ".sh$" | grep "$USER_DIR" | $com2 "$arq" "$para" >> "$log" ;;
+            /etc/fstab|/etc/default/grub|/etc/hostname) $com1 "$pattern" | $com2 "$arq" "$para" >> "$log" ;;
+            /etc/apt/sources.list*) $com1 "$pattern" | $com2 "$arq" "$para" >> "$log" ;;
+            /etc/yum.repos.d/*) $com1 "$pattern" | $com2 "$arq" "$para" >> "$log" ;;
         esac
         count=$((count + 1))
         progress_bar "$total" "$count"
