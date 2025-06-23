@@ -18,7 +18,6 @@ Mdia=$(date +%Y%m%d)
 arq="$HOSTNAME.confs.$Mdia.zip"
 log="$HOME/backup_$Mdia.log"
 USER_DIR="$HOME"
-TMP_LOG=$(mktemp)
 
 # 📊 Function: Show terminal progress bar with color
 progress_bar() {
