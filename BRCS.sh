@@ -24,9 +24,16 @@ progress_bar() {
     local total=$1
     local current=$2
     local bar_length=30
-    percent=$((current * 100 / total))
-    filled=$((bar_length * percent / 100))
-    empty=$((bar_length - filled))
+
+    if [ "$total" -eq 0 ]; then
+        percent=100
+        filled=$bar_length
+        empty=0
+    else
+        percent=$((current * 100 / total))
+        filled=$((bar_length * percent / 100))
+        empty=$((bar_length - filled))
+    fi
     bar="\e[1;32m$(printf '%0.s█' $(seq 1 $filled))\e[0m$(printf '%0.s░' $(seq 1 $empty))"
     printf "\r[%b] %3d%%" "$bar" "$percent"
     [ "$current" -eq "$total" ] && echo
@@ -90,8 +97,8 @@ restaurar_configs() {
             echo "[⏭️] Skipped: $DEST"
         fi
         count=$((count+1))
+        progress_bar "$total" "$count"
     done
-    progress_bar "$total" "$count"
     rm -rf "$TMPDIR"
     echo "[✅] Restore complete."
 }
@@ -115,8 +122,8 @@ restaurar_tudo() {
         sudo cp "$FILE" "$DEST"
         echo "[✅] Restored: $DEST"
         count=$((count+1))
+        progress_bar "$total" "$count"
     done
-    progress_bar "$total" "$count"
     rm -rf "$TMPDIR"
     echo "[✅] Full restore complete."
 }
@@ -186,8 +193,9 @@ limpeza_completa() {
 # ⏰ Function: Schedule Cleanup at Boot
 schedule_cleanup() {
     echo "⏰ Scheduling cleanup at boot..."
-    CRON_CMD="@reboot bash $PWD/$0 --limpeza"
-    (crontab -l 2>/dev/null | grep -v "$0" ; echo "$CRON_CMD") | crontab -
+    local script_path="$(readlink -f "$0")"
+    CRON_CMD="@reboot bash $script_path --limpeza"
+    (crontab -l 2>/dev/null | grep -v "$script_path" ; echo "$CRON_CMD") | crontab -
     echo "[✅] Cleanup scheduled at boot."
 }
 
