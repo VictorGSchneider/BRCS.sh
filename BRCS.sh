@@ -618,9 +618,43 @@ schedule_cleanup() {
     log_msg INFO "Scheduling cleanup at boot..."
     local script_path
     script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-    local CRON_CMD="@reboot bash $script_path --cleanup"
-    (crontab -l 2>/dev/null | grep -v "$script_path" ; echo "$CRON_CMD") | crontab -
-    log_msg INFO "Cleanup scheduled at boot."
+
+    if command -v crontab >/dev/null 2>&1; then
+        local CRON_CMD="@reboot bash $script_path --cleanup"
+        (crontab -l 2>/dev/null | grep -v "$script_path" ; echo "$CRON_CMD") | crontab -
+        log_msg INFO "Cleanup scheduled at boot via crontab."
+    elif command -v systemctl >/dev/null 2>&1; then
+        local unit_dir="/etc/systemd/system"
+        check_root
+
+        sudo tee "$unit_dir/brcs-cleanup.service" >/dev/null <<EOF
+[Unit]
+Description=BRCS system cleanup at boot
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $script_path --cleanup
+EOF
+
+        sudo tee "$unit_dir/brcs-cleanup.timer" >/dev/null <<EOF
+[Unit]
+Description=Run BRCS cleanup on boot
+
+[Timer]
+OnBootSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+        sudo systemctl daemon-reload
+        sudo systemctl enable brcs-cleanup.timer
+        log_msg INFO "Cleanup scheduled at boot via systemd timer."
+    else
+        log_msg ERROR "Neither crontab nor systemctl found. Cannot schedule cleanup."
+        return 1
+    fi
 }
 
 # --- Skip menu when sourced by tests or other scripts ---
