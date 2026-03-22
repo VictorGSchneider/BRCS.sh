@@ -9,7 +9,6 @@ setup() {
 
   cat <<'EOS' > "$STUBS/locate"
 #!/bin/bash
-shift
 # Output dummy paths; actual files are irrelevant
 printf '/etc/dummy.conf\n'
 EOS
