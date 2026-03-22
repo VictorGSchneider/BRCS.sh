@@ -36,7 +36,20 @@ teardown() {
   rm -rf "$TMPDIR_RES"
 }
 
-@test "restaurar_tudo extracts all files" {
+@test "restore_all extracts all files" {
+  archive="$TMPDIR_RES/test.zip"
+  mkdir -p "$TMPDIR_RES/data/etc"
+  echo "demo" > "$TMPDIR_RES/data/etc/test.conf"
+  (cd "$TMPDIR_RES/data" && zip -r "$archive" etc >/dev/null)
+  export ARCHIVE="$archive"
+
+  script="$BATS_TEST_DIRNAME/../BRCS.sh"
+  export SCRIPT="$script"
+  run bash -c 'source "$SCRIPT" >/dev/null; echo "$ARCHIVE" | restore_all >/dev/null; test -f "$DESTDIR/etc/test.conf"'
+  [ "$status" -eq 0 ]
+}
+
+@test "restaurar_tudo backward-compatible alias works" {
   archive="$TMPDIR_RES/test.zip"
   mkdir -p "$TMPDIR_RES/data/etc"
   echo "demo" > "$TMPDIR_RES/data/etc/test.conf"
