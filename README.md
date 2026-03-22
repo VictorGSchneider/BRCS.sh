@@ -1,72 +1,146 @@
-# 🛠️ BRCS.sh, a Linux System Maintenance CLI
+# BRCS.sh - Linux System Maintenance CLI
 
-A handy command-line tool to back up and restore Linux system configurations, clean up unnecessary files, and schedule automatic maintenance at system startup.
-BRCS is an acronym for Backup, Restoration, Cleaner and Schedule.
+A command-line tool to back up and restore Linux system configurations, clean up unnecessary files, and schedule automatic maintenance at system startup. Works on any major Linux distribution.
 
-## 📦 Features
+BRCS is an acronym for **B**ackup, **R**estoration, **C**leaner and **S**chedule.
 
-- 💾 Backup configuration files (`.conf`, `.ini`, `.rules`, etc.)
-- 🔁 Restore interactively or in bulk
-- 🧹 Clean package cache, orphaned packages, Snap, Flatpak, and Steam leftovers
-- ⏰ Schedule cleanup automatically at boot
-- 📊 Terminal-based progress bar for all operations
-- Simple, intuitive terminal menu interface
+## Features
 
-## ⚙️ Requirements
+### Backup
+- Configuration files under `/etc/` (`.conf`, `.ini`, `.rules`)
+- User dotfiles (`.bashrc`, `.zshrc`, `.vimrc`, `.gitconfig`, `.tmux.conf`, etc.)
+- Crontabs and `/etc/cron.d`
+- Systemd custom units (`.service`, `.timer`, `.mount`, `.socket`)
+- SSH configs (`config`, `authorized_keys`, `sshd_config`)
+- Firewall rules (iptables, nftables, ufw, firewalld)
+- Network configs (NetworkManager, netplan, systemd-networkd)
+- System files (`/etc/fstab`, `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, etc.)
+- Package repo configs (detected per distro)
+- Shell scripts in `$HOME`
 
-- `bash`
-- `zip`
-- `unzip`
-- `locate`
-- `deborphan` *(optional but recommended)*
-- `localepurge` *(optional)*
-- `flatpak` *(optional)*
-- `snapd` *(optional)*
+### Restore
+- Interactive mode: review diffs and choose per file
+- Bulk mode: restore everything at once
+- Validates zip integrity before restoring
+- Creates a safety backup of existing files before overwriting
+- List backup contents without restoring (`--list`)
 
-### Install missing tools via:
-`sudo apt install zip unzip locate deborphan localepurge flatpak snapd`
+### Cleanup
+- Update and upgrade system packages
+- Clean package manager cache
+- Remove orphaned/unused packages
+- Clean systemd journal logs (vacuum to 7d / 100MB)
+- Remove old kernels (apt, dnf)
+- Clean disabled Snap revisions
+- Remove unused Flatpak runtimes
+- Prune Docker resources
+- Clear Steam shader/compat cache
+- Clean `/tmp` and `/var/tmp` (skips files in use)
+- Reports disk space freed at the end
+- Dry-run mode to preview without making changes
 
-## 🚀 How to Use
+### General
+- Full CLI interface for scripting and automation
+- Interactive terminal menu for manual use
+- Timestamped color-coded logging (INFO, WARN, ERROR)
+- Terminal progress bar for all operations
+- Signal trapping for safe temp file cleanup
+- Root/sudo check before privileged operations
 
-1. Download the file:
+## Supported Distributions
 
-2. Make the script executable:
-`chmod +x BRCS.sh`
+| Package Manager | Distributions |
+|----------------|---------------|
+| `apt` | Debian, Ubuntu, Linux Mint, Zorin OS, Pop!_OS |
+| `dnf` | Fedora, RHEL 9+, CentOS Stream |
+| `yum` | CentOS 7, RHEL 7/8 |
+| `pacman` | Arch Linux, Manjaro, EndeavourOS |
+| `zypper` | openSUSE Tumbleweed/Leap, SLES |
+| `apk` | Alpine Linux |
 
-3. Run it:
-`./BRCS.sh`
+## Requirements
 
-4. Follow the interactive menu.
+- `bash` (version 3.2+)
+- `zip` and `unzip`
+
+Optional tools (used automatically if available):
+- `locate` or `mlocate`/`plocate` (faster file search; falls back to `find`)
+- `deborphan`, `localepurge` (Debian-based cleanup)
+- `paccache` (Arch cache cleanup)
+- `flatpak`, `snap`, `docker` (cleaned if present)
+- `lsof` or `fuser` (safe temp file cleanup)
+- `diff` (interactive restore diffs)
+
+### Install on Debian/Ubuntu
+```bash
+sudo apt install zip unzip mlocate
 ```
-🛠️ System Maintenance Menu
-1️⃣  Backup configurations
-2️⃣  Restore configurations
-3️⃣  Full system cleanup
-4️⃣  Schedule cleanup at boot
-5️⃣  Exit
+
+### Install on Fedora
+```bash
+sudo dnf install zip unzip mlocate
 ```
 
-## 📁 Backups
+### Install on Arch
+```bash
+sudo pacman -S zip unzip mlocate
+```
 
-Backup files are saved in the format: `hostname.confs.YYYYMMDD.zip`
+## Usage
 
-Logs are saved to `~/backup_YYYYMMDD.log`
+### Interactive menu
 
-## 🖥️ System Information
+```bash
+chmod +x BRCS.sh
+./BRCS.sh
+```
 
-| Component         | Details                                      |
-|------------------|----------------------------------------------|
-| **Model**         | Lenovo IdeaPad S145-15IWL                    |
-| **Memory**        | 8 GiB                                        |
-| **Processor**     | Intel® Core™ i7-8565U CPU @ 1.80GHz × 8      |
-| **Graphics**      | Mesa Intel® UHD Graphics 620 (WHL GT2)       |
-| **Disk Capacity** | 120 GB                                       |
-| **OS**            | Zorin OS 17.3 Core (64-bit)                  |
-| **Window System** | Wayland                                      |
+```
+=== BRCS v2.0.0 - System Maintenance ===
+1) Backup configurations
+2) Restore configurations
+3) Full system cleanup
+4) Full system cleanup (dry-run)
+5) List backup contents
+6) Schedule cleanup at boot
+7) Exit
+```
 
-🧪 This utility has been tested and works well with the setup above.
+### CLI (non-interactive)
 
-## 📜 License
+```bash
+# Backup all configurations
+./BRCS.sh --backup
+
+# Restore all from a backup file
+./BRCS.sh --restore backup.zip
+
+# Restore interactively (review each file)
+./BRCS.sh --restore-interactive backup.zip
+
+# List contents of a backup
+./BRCS.sh --list backup.zip
+
+# Run full system cleanup
+./BRCS.sh --cleanup
+
+# Preview cleanup without making changes
+./BRCS.sh --dry-run --cleanup
+
+# Schedule cleanup at boot
+./BRCS.sh --schedule
+
+# Show help
+./BRCS.sh --help
+```
+
+## Backups
+
+Backup files are saved as: `hostname.confs.YYYYMMDD.zip`
+
+Logs are saved to: `~/backup_YYYYMMDD.log`
+
+## License
 
 This project is licensed under the terms of the [GNU General Public License v3.0](LICENSE).
 
@@ -78,4 +152,3 @@ Install it via your package manager (e.g. `sudo apt install bats`) and then exec
 ```bash
 bats test
 ```
-
