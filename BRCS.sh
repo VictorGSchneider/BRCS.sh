@@ -17,9 +17,9 @@ VERSION="2.0.0"
 
 # Hostname fallback and date for backup filename
 MY_HOSTNAME="${HOSTNAME:-$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)}"
-Mdia=$(date +%Y%m%d)
-arq="$MY_HOSTNAME.confs.$Mdia.zip"
-log="$HOME/backup_$Mdia.log"
+TODAY=$(date +%Y%m%d)
+arq="$MY_HOSTNAME.confs.$TODAY.zip"
+log="$HOME/backup_$TODAY.log"
 USER_DIR="$HOME"
 DRY_RUN=0
 
@@ -275,34 +275,34 @@ backup_configs() {
 # --- List backup contents ---
 
 list_backup_contents() {
-    local arquivo="${1:-}"
-    [ -z "$arquivo" ] && read -r -p "Enter the path to the backup file (.zip): " arquivo
-    [ ! -f "$arquivo" ] && log_msg ERROR "File not found: $arquivo" && return 1
+    local backup_file="${1:-}"
+    [ -z "$backup_file" ] && read -r -p "Enter the path to the backup file (.zip): " backup_file
+    [ ! -f "$backup_file" ] && log_msg ERROR "File not found: $backup_file" && return 1
 
-    if ! unzip -t "$arquivo" >/dev/null 2>&1; then
-        log_msg ERROR "Invalid or corrupted zip file: $arquivo"
+    if ! unzip -t "$backup_file" >/dev/null 2>&1; then
+        log_msg ERROR "Invalid or corrupted zip file: $backup_file"
         return 1
     fi
 
-    log_msg INFO "Contents of: $arquivo"
-    unzip -l "$arquivo"
+    log_msg INFO "Contents of: $backup_file"
+    unzip -l "$backup_file"
 }
 
 # --- Restore (interactive) ---
 
-restaurar_configs() {
+restore_interactive() {
     check_root
 
-    local arquivo="${1:-}"
-    [ -z "$arquivo" ] && read -r -p "Enter the path to the backup file (.zip): " arquivo
-    [ ! -f "$arquivo" ] && log_msg ERROR "File not found." && return 1
+    local backup_file="${1:-}"
+    [ -z "$backup_file" ] && read -r -p "Enter the path to the backup file (.zip): " backup_file
+    [ ! -f "$backup_file" ] && log_msg ERROR "File not found." && return 1
 
     if ! command -v unzip >/dev/null 2>&1; then
         log_msg ERROR "'unzip' is not installed. Please install it first."
         return 1
     fi
 
-    if ! unzip -t "$arquivo" >/dev/null 2>&1; then
+    if ! unzip -t "$backup_file" >/dev/null 2>&1; then
         log_msg ERROR "Invalid or corrupted zip file."
         return 1
     fi
@@ -310,7 +310,7 @@ restaurar_configs() {
     local TMPDIR_RESTORE
     TMPDIR_RESTORE=$(mktemp -d)
     _BRCS_TEMPFILES+=("$TMPDIR_RESTORE")
-    unzip -o "$arquivo" -d "$TMPDIR_RESTORE" >/dev/null
+    unzip -o "$backup_file" -d "$TMPDIR_RESTORE" >/dev/null
 
     collect_files "$TMPDIR_RESTORE"
     local files=("${_collected_files[@]}")
@@ -358,21 +358,24 @@ restaurar_configs() {
     log_msg INFO "Restore complete."
 }
 
+# Backward-compatible alias
+restaurar_configs() { restore_interactive "$@"; }
+
 # --- Restore all (no prompt) ---
 
-restaurar_tudo() {
+restore_all() {
     check_root
 
-    local arquivo="${1:-}"
-    [ -z "$arquivo" ] && read -r -p "Enter the path to the backup file (.zip): " arquivo
-    [ ! -f "$arquivo" ] && log_msg ERROR "File not found." && return 1
+    local backup_file="${1:-}"
+    [ -z "$backup_file" ] && read -r -p "Enter the path to the backup file (.zip): " backup_file
+    [ ! -f "$backup_file" ] && log_msg ERROR "File not found." && return 1
 
     if ! command -v unzip >/dev/null 2>&1; then
         log_msg ERROR "'unzip' is not installed. Please install it first."
         return 1
     fi
 
-    if ! unzip -t "$arquivo" >/dev/null 2>&1; then
+    if ! unzip -t "$backup_file" >/dev/null 2>&1; then
         log_msg ERROR "Invalid or corrupted zip file."
         return 1
     fi
@@ -380,7 +383,7 @@ restaurar_tudo() {
     local TMPDIR_RESTORE
     TMPDIR_RESTORE=$(mktemp -d)
     _BRCS_TEMPFILES+=("$TMPDIR_RESTORE")
-    unzip -o "$arquivo" -d "$TMPDIR_RESTORE" >/dev/null
+    unzip -o "$backup_file" -d "$TMPDIR_RESTORE" >/dev/null
 
     collect_files "$TMPDIR_RESTORE"
     local files=("${_collected_files[@]}")
@@ -411,6 +414,9 @@ restaurar_tudo() {
     rm -rf "$TMPDIR_RESTORE"
     log_msg INFO "Full restore complete."
 }
+
+# Backward-compatible alias
+restaurar_tudo() { restore_all "$@"; }
 
 # --- Package manager wrappers ---
 
@@ -476,7 +482,7 @@ pkg_autoremove() {
 
 # --- Full cleanup ---
 
-limpeza_completa() {
+full_cleanup() {
     check_root
     log_msg INFO "Starting full cleanup..."
 
@@ -603,6 +609,9 @@ limpeza_completa() {
     log_msg INFO "Full cleanup completed."
 }
 
+# Backward-compatible alias
+limpeza_completa() { full_cleanup "$@"; }
+
 # --- Schedule cleanup at boot ---
 
 schedule_cleanup() {
@@ -678,16 +687,16 @@ case "$ACTION" in
         ;;
     restore)
         [ -z "$CLI_FILE" ] && { log_msg ERROR "No file specified for --restore"; show_help; exit 1; }
-        restaurar_tudo "$CLI_FILE"
+        restore_all "$CLI_FILE"
         exit $?
         ;;
     restore_interactive)
         [ -z "$CLI_FILE" ] && { log_msg ERROR "No file specified for --restore-interactive"; show_help; exit 1; }
-        restaurar_configs "$CLI_FILE"
+        restore_interactive "$CLI_FILE"
         exit $?
         ;;
     cleanup)
-        limpeza_completa
+        full_cleanup
         exit $?
         ;;
     list)
@@ -725,13 +734,13 @@ while true; do
             echo "3 - Back"
             read -r -p "Choose an option: " restopt
             case "$restopt" in
-                1) restaurar_configs ;;
-                2) restaurar_tudo ;;
+                1) restore_interactive ;;
+                2) restore_all ;;
                 *) echo "Returning..." ;;
             esac
             ;;
-        3) DRY_RUN=0; limpeza_completa ;;
-        4) DRY_RUN=1; limpeza_completa; DRY_RUN=0 ;;
+        3) DRY_RUN=0; full_cleanup ;;
+        4) DRY_RUN=1; full_cleanup; DRY_RUN=0 ;;
         5) list_backup_contents ;;
         6) schedule_cleanup ;;
         7) echo "Goodbye!"; exit 0 ;;
