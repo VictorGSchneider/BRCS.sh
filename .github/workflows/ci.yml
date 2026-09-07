@@ -1,0 +1,57 @@
+# BRCS.sh — CI
+#
+# Two jobs, split by what breaks: a shellcheck finding should not hide a
+# failing test, and a failing test should not wait behind an apt install.
+#
+# Everything here is runnable on your own machine:
+#   shellcheck -S warning BRCS.sh test/*.bats
+#   bats test/
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A second push supersedes the first; there is nothing to learn from
+# finishing a run against a commit nobody will look at again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: shell (syntax + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          command -v shellcheck >/dev/null && exit 0
+          sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: bash -n
+        run: bash -n BRCS.sh
+
+      # -S warning, not the default: the two style notes left in the file
+      # are deliberate, and a CI that cries wolf is a CI nobody reads.
+      - name: shellcheck
+        run: shellcheck -S warning BRCS.sh test/*.bats
+
+  tests:
+    name: tests (bats)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats zip unzip
+
+      - name: bats
+        run: bats test/
