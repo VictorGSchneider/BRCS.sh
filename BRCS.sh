@@ -994,13 +994,22 @@ OnUnitActiveSec=1w
 WantedBy=timers.target
 TMREOF
 
-        systemctl --user daemon-reload
-        systemctl --user enable --now brcs-cleanup.timer
-        log_msg INFO "Unprivileged cleanup scheduled via a systemd --user timer."
-        log_msg INFO "It runs 5 minutes after you log in, then weekly."
-        log_msg INFO "To undo: systemctl --user disable --now brcs-cleanup.timer"
-        log_msg INFO "To keep it running when logged out: loginctl enable-linger \$USER (needs an admin)."
-        return 0
+        # Report what actually happened. A user manager can answer
+        # show-environment and still refuse to enable a timer, and saying
+        # "scheduled" when nothing was is worse than saying nothing.
+        if systemctl --user daemon-reload 2>/dev/null && \
+           systemctl --user enable --now brcs-cleanup.timer 2>/dev/null; then
+            log_msg INFO "Unprivileged cleanup scheduled via a systemd --user timer."
+            log_msg INFO "It runs 5 minutes after you log in, then weekly."
+            log_msg INFO "To undo: systemctl --user disable --now brcs-cleanup.timer"
+            log_msg INFO "To keep it running when logged out: loginctl enable-linger \$USER (needs an admin)."
+            return 0
+        fi
+
+        # Half-installed units are worse than none: leave nothing behind
+        # for a later daemon-reload to pick up.
+        rm -f "$unit_dir/brcs-cleanup.service" "$unit_dir/brcs-cleanup.timer"
+        log_msg WARN "A systemd --user timer could not be enabled; falling back to cron."
     fi
 
     if command -v crontab >/dev/null 2>&1; then

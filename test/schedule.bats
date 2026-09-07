@@ -43,12 +43,11 @@ exec "$@"
 EOS
   chmod +x "$STUBS/sudo"
 
-  # No systemd on this fake host, so the crontab branch is the one taken.
-  cat <<'EOS' > "$STUBS/systemctl"
-#!/bin/bash
-exit 127
-EOS
-  : > "$STUBS/.keep"
+  # systemctl is stubbed per-test rather than inherited from the host: a
+  # GitHub runner has a live --user manager and a container has none, and
+  # the branch taken must not depend on which one you are standing in.
+  export SYSTEMCTL_LOG="$TMP/systemctl.calls"
+  : > "$SYSTEMCTL_LOG"
 
   PATH_SAVE="$PATH"
   export PATH="$STUBS:$PATH"
@@ -85,6 +84,7 @@ teardown() {
 }
 
 @test "schedule_cleanup without systemd writes to root's crontab, not the user's" {
+  stub_systemctl_absent
   run bash -c 'source "$SCRIPT" >/dev/null
     # Pretend systemctl is absent so the crontab branch is taken.
     systemctl() { return 127; }
@@ -132,8 +132,52 @@ teardown() {
   [ "$(sed -n 2p "$USER_CRONTAB")" = "b /two" ]
 }
 
-@test "--schedule --user falls back to the user's own crontab" {
-  # No systemd user manager in this environment, so the cron path is taken.
+# No user manager: show-environment fails, so the cron path is taken.
+stub_systemctl_absent() {
+  cat <<'EOS' > "$STUBS/systemctl"
+#!/bin/bash
+echo "$*" >> "$SYSTEMCTL_LOG"
+exit 1
+EOS
+  chmod +x "$STUBS/systemctl"
+}
+
+# A live user manager that accepts everything.
+stub_systemctl_working() {
+  cat <<'EOS' > "$STUBS/systemctl"
+#!/bin/bash
+echo "$*" >> "$SYSTEMCTL_LOG"
+exit 0
+EOS
+  chmod +x "$STUBS/systemctl"
+}
+
+# Answers show-environment but refuses to enable — a real shape, and the
+# one where reporting success would be a lie.
+stub_systemctl_cannot_enable() {
+  cat <<'EOS' > "$STUBS/systemctl"
+#!/bin/bash
+echo "$*" >> "$SYSTEMCTL_LOG"
+case "$*" in *enable*) exit 1 ;; esac
+exit 0
+EOS
+  chmod +x "$STUBS/systemctl"
+}
+
+@test "--schedule --user installs a systemd --user timer when one can run" {
+  stub_systemctl_working
+  run bash "$SCRIPT" --schedule --user </dev/null
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.config/systemd/user/brcs-cleanup.timer" ]
+  grep -q -- "--cleanup --user" "$HOME/.config/systemd/user/brcs-cleanup.service"
+  grep -q "enable --now brcs-cleanup.timer" "$SYSTEMCTL_LOG"
+  # Nothing privileged, and no cron entry when the timer took.
+  [ ! -s "$ROOT_CRONTAB" ]
+  [ ! -s "$USER_CRONTAB" ]
+}
+
+@test "--schedule --user falls back to the user's own crontab with no user manager" {
+  stub_systemctl_absent
   run bash "$SCRIPT" --schedule --user </dev/null
   [ "$status" -eq 0 ]
   grep -q -- "--cleanup --user" "$USER_CRONTAB"
@@ -141,7 +185,19 @@ teardown() {
   [ ! -s "$ROOT_CRONTAB" ]
 }
 
+@test "--schedule --user falls back rather than claim a timer it could not enable" {
+  stub_systemctl_cannot_enable
+  run bash "$SCRIPT" --schedule --user </dev/null
+  [ "$status" -eq 0 ]
+  # No half-installed units left for a later daemon-reload to find.
+  [ ! -f "$HOME/.config/systemd/user/brcs-cleanup.timer" ]
+  [ ! -f "$HOME/.config/systemd/user/brcs-cleanup.service" ]
+  # And it actually scheduled something, by the other route.
+  grep -q -- "--cleanup --user" "$USER_CRONTAB"
+}
+
 @test "--schedule --user is idempotent" {
+  stub_systemctl_absent
   bash "$SCRIPT" --schedule --user </dev/null >/dev/null 2>&1
   bash "$SCRIPT" --schedule --user </dev/null >/dev/null 2>&1
   [ "$(grep -c -- "--cleanup --user" "$USER_CRONTAB")" -eq 1 ]
