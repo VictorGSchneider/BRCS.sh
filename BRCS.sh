@@ -13,15 +13,39 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 # Hostname fallback and date for backup filename
 MY_HOSTNAME="${HOSTNAME:-$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)}"
 TODAY=$(date +%Y%m%d)
-arq="$MY_HOSTNAME.confs.$TODAY.zip"
+
+# Where archives land. Anchored, like the log on the line below it. Left
+# unanchored, the archive was written to whatever directory you happened to
+# be standing in, so a backup taken from one shell was invisible from the
+# next and --list could not find it again.
+BACKUP_DIR="${BRCS_BACKUP_DIR:-$HOME}"
+arq="$BACKUP_DIR/$MY_HOSTNAME.confs.$TODAY.zip"
 log="$HOME/backup_$TODAY.log"
 USER_DIR="$HOME"
 DRY_RUN=0
+
+# --- Cleanup scope ---
+# "full" is every step, for someone watching it run. "safe" is what an
+# unattended run scheduled at boot is allowed to do on its own: delete
+# garbage and change nothing else. It leaves out the system upgrade and
+# orphan removal (both alter what is installed, unwatched), old-kernel
+# removal, the docker prune (stopped containers are someone's work), and
+# the Steam step -- a shader cache is regenerable, but rebuilding it costs
+# a stuttering first launch per game, so wiping it on every boot is worse
+# than useless.
+CLEANUP_SCOPE="full"
+_SAFE_STEPS=" clean flatpak journal leftovers tmp "
+
+_step() {
+    [ "$CLEANUP_SCOPE" = "full" ] && return 0
+    case "$_SAFE_STEPS" in *" $1 "*) return 0 ;; esac
+    return 1
+}
 
 # --- Helper functions ---
 
@@ -50,8 +74,28 @@ run_cmd() {
 }
 
 check_root() {
-    if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
-        log_msg WARN "Not running as root and sudo not found. Some operations may fail."
+    [ "$(id -u)" -eq 0 ] && return 0
+
+    if ! command -v sudo >/dev/null 2>&1; then
+        log_msg ERROR "Needs root and sudo is not installed."
+        return 1
+    fi
+
+    # --dry-run executes nothing, so there is no sudo to fail and no
+    # faillock counter to trip. Let a piped preview through: refusing it
+    # would make the one mode that is safe to run unattended the one mode
+    # you could not.
+    [ "$DRY_RUN" -eq 1 ] && return 0
+
+    # Unprivileged *and* unattended is the dangerous combination. Every
+    # sudo below would be a PAM auth attempt with no terminal to prompt
+    # on; PAM logs each as "conversation failed" and pam_faillock counts
+    # it. Three attempts is the default on several distributions, and the
+    # account is then locked -- at the login screen, on the next boot.
+    # Refuse once, loudly, rather than trip that.
+    if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
+        log_msg ERROR "Needs root, but there is no terminal to ask for a password."
+        log_msg ERROR "Run it as root, or grant this user a NOPASSWD sudoers rule."
         return 1
     fi
     return 0
@@ -150,6 +194,7 @@ get_disk_used_kb() {
 # --- Backup ---
 
 backup_configs() {
+    mkdir -p "$BACKUP_DIR" 2>/dev/null
     log_msg INFO "Starting backup..."
 
     if ! command -v zip >/dev/null 2>&1; then
@@ -318,7 +363,9 @@ restore_interactive() {
     local count=0
 
     # Safety backup of files that will be overwritten
-    local pre_restore_backup="$HOME/pre_restore_$(date +%Y%m%d_%H%M%S).zip"
+    local pre_restore_backup
+    mkdir -p "$BACKUP_DIR" 2>/dev/null
+    pre_restore_backup="$BACKUP_DIR/pre_restore_$(date +%Y%m%d_%H%M%S).zip"
     local existing_targets=()
     for FILE in "${files[@]}"; do
         local DEST="/${FILE#"$TMPDIR_RESTORE"/}"
@@ -391,7 +438,9 @@ restore_all() {
     local count=0
 
     # Safety backup of files that will be overwritten
-    local pre_restore_backup="$HOME/pre_restore_$(date +%Y%m%d_%H%M%S).zip"
+    local pre_restore_backup
+    mkdir -p "$BACKUP_DIR" 2>/dev/null
+    pre_restore_backup="$BACKUP_DIR/pre_restore_$(date +%Y%m%d_%H%M%S).zip"
     local existing_targets=()
     for FILE in "${files[@]}"; do
         local DEST="/${FILE#"$TMPDIR_RESTORE"/}"
@@ -458,8 +507,18 @@ pkg_autoremove() {
         apt)
             run_cmd sudo apt-get autoremove -y
             if command -v deborphan >/dev/null 2>&1; then
-                deborphan | xargs run_cmd sudo apt-get -y remove --purge 2>/dev/null
-                deborphan --guess-data | xargs run_cmd sudo apt-get -y remove --purge 2>/dev/null
+                # run_cmd is a shell function, so xargs could never exec
+                # it: this branch has always been a silent no-op, with
+                # xargs' "run_cmd: No such file or directory" swallowed by
+                # the redirect. Collect the names and pass them as
+                # arguments instead.
+                local orphaned
+                mapfile -t orphaned < <(deborphan 2>/dev/null)
+                [ "${#orphaned[@]}" -gt 0 ] && \
+                    run_cmd sudo apt-get -y remove --purge "${orphaned[@]}"
+                mapfile -t orphaned < <(deborphan --guess-data 2>/dev/null)
+                [ "${#orphaned[@]}" -gt 0 ] && \
+                    run_cmd sudo apt-get -y remove --purge "${orphaned[@]}"
             fi
             if command -v localepurge >/dev/null 2>&1; then
                 run_cmd sudo localepurge
@@ -474,7 +533,15 @@ pkg_autoremove() {
                 echo "$orphans" | run_cmd sudo pacman -Rns --noconfirm - 2>/dev/null
             fi
             ;;
-        zypper) zypper packages --unneeded 2>/dev/null | awk -F'|' 'NR>4{print $3}' | xargs run_cmd sudo zypper remove -y 2>/dev/null ;;
+        zypper)
+            # The same xargs-cannot-exec-a-shell-function defect as the
+            # apt branch above. Field 3 also arrives padded with the
+            # table's column spacing, so strip it before use.
+            local unneeded
+            mapfile -t unneeded < <(zypper packages --unneeded 2>/dev/null \
+                | awk -F'|' 'NR>4 {gsub(/ /, "", $3); if ($3 != "") print $3}')
+            [ "${#unneeded[@]}" -gt 0 ] && run_cmd sudo zypper remove -y "${unneeded[@]}"
+            ;;
         apk)    : ;; # apk has no autoremove
         *)      log_msg WARN "Unknown package manager, skipping autoremove." ;;
     esac
@@ -483,114 +550,193 @@ pkg_autoremove() {
 # --- Full cleanup ---
 
 full_cleanup() {
-    check_root
-    log_msg INFO "Starting full cleanup..."
+    check_root || return 1
+    log_msg INFO "Starting ${CLEANUP_SCOPE} cleanup..."
 
     local space_before
     space_before=$(get_disk_used_kb)
 
-    local steps=("update" "clean" "autoremove" "snap" "flatpak" "journal" "kernels" "docker" "steam" "tmp")
+    local steps
+    if [ "$CLEANUP_SCOPE" = "safe" ]; then
+        steps=("clean" "flatpak" "journal" "leftovers" "tmp")
+    else
+        steps=("update" "clean" "autoremove" "snap" "flatpak" "journal" \
+               "kernels" "docker" "steam" "leftovers" "tmp")
+    fi
     local total=${#steps[@]}
     local count=0
 
     # 1. Update & upgrade
-    pkg_update
-    count=$((count+1)); progress_bar "$total" "$count"
+    if _step update; then
+        pkg_update
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
 
     # 2. Clean package cache
-    pkg_clean
-    count=$((count+1)); progress_bar "$total" "$count"
+    if _step clean; then
+        pkg_clean
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
 
     # 3. Remove orphan packages
-    pkg_autoremove
-    count=$((count+1)); progress_bar "$total" "$count"
+    if _step autoremove; then
+        pkg_autoremove
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
 
     # 4. Snap cleanup
-    if command -v snap >/dev/null 2>&1; then
-        run_cmd sudo snap set system refresh.retain=2 2>/dev/null
-        if [ "$DRY_RUN" -eq 0 ]; then
-            snap list --all 2>/dev/null | awk '/disabled/{print $1, $2}' | while read -r snapname revision; do
-                sudo snap remove "$snapname" --revision="$revision" --purge 2>/dev/null || \
-                sudo snap remove "$snapname" --purge 2>/dev/null
-            done
-        else
-            log_msg INFO "[DRY-RUN] Would clean disabled snap revisions"
+    if _step snap; then
+        if command -v snap >/dev/null 2>&1; then
+            run_cmd sudo snap set system refresh.retain=2 2>/dev/null
+            if [ "$DRY_RUN" -eq 0 ]; then
+                snap list --all 2>/dev/null | awk '/disabled/{print $1, $2}' | while read -r snapname revision; do
+                    sudo snap remove "$snapname" --revision="$revision" --purge 2>/dev/null || \
+                    sudo snap remove "$snapname" --purge 2>/dev/null
+                done
+            else
+                log_msg INFO "[DRY-RUN] Would clean disabled snap revisions"
+            fi
         fi
+        count=$((count+1)); progress_bar "$total" "$count"
     fi
-    count=$((count+1)); progress_bar "$total" "$count"
 
     # 5. Flatpak cleanup
-    if command -v flatpak >/dev/null 2>&1; then
-        run_cmd flatpak uninstall --unused -y 2>/dev/null
+    if _step flatpak; then
+        if command -v flatpak >/dev/null 2>&1; then
+            run_cmd flatpak uninstall --unused -y 2>/dev/null
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
     fi
-    count=$((count+1)); progress_bar "$total" "$count"
 
     # 6. Journal log cleanup
-    if command -v journalctl >/dev/null 2>&1; then
-        run_cmd sudo journalctl --vacuum-time=7d 2>/dev/null
-        run_cmd sudo journalctl --vacuum-size=100M 2>/dev/null
+    if _step journal; then
+        if command -v journalctl >/dev/null 2>&1; then
+            run_cmd sudo journalctl --vacuum-time=7d 2>/dev/null
+            run_cmd sudo journalctl --vacuum-size=100M 2>/dev/null
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
     fi
-    count=$((count+1)); progress_bar "$total" "$count"
 
     # 7. Old kernel cleanup
-    if [ "$PKG_MANAGER" = "apt" ]; then
-        local current_kernel
-        current_kernel=$(uname -r)
-        if [ "$DRY_RUN" -eq 0 ]; then
-            dpkg -l 'linux-image-*' 2>/dev/null | awk '/^ii/{print $2}' | grep -v "$current_kernel" | grep -v 'linux-image-generic' | while read -r pkg; do
-                sudo apt-get remove -y "$pkg" 2>/dev/null
-            done
-        else
-            local old_kernels
-            old_kernels=$(dpkg -l 'linux-image-*' 2>/dev/null | awk '/^ii/{print $2}' | grep -v "$current_kernel" | grep -v 'linux-image-generic')
-            [ -n "$old_kernels" ] && log_msg INFO "[DRY-RUN] Would remove old kernels: $old_kernels"
+    if _step kernels; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            local current_kernel
+            current_kernel=$(uname -r)
+            if [ "$DRY_RUN" -eq 0 ]; then
+                dpkg -l 'linux-image-*' 2>/dev/null | awk '/^ii/{print $2}' | grep -v "$current_kernel" | grep -v 'linux-image-generic' | while read -r pkg; do
+                    sudo apt-get remove -y "$pkg" 2>/dev/null
+                done
+            else
+                local old_kernels
+                old_kernels=$(dpkg -l 'linux-image-*' 2>/dev/null | awk '/^ii/{print $2}' | grep -v "$current_kernel" | grep -v 'linux-image-generic')
+                [ -n "$old_kernels" ] && log_msg INFO "[DRY-RUN] Would remove old kernels: $old_kernels"
+            fi
+        elif [ "$PKG_MANAGER" = "dnf" ]; then
+            run_cmd sudo dnf remove --oldinstallonly -y 2>/dev/null
         fi
-    elif [ "$PKG_MANAGER" = "dnf" ]; then
-        run_cmd sudo dnf remove --oldinstallonly -y 2>/dev/null
+        count=$((count+1)); progress_bar "$total" "$count"
     fi
-    count=$((count+1)); progress_bar "$total" "$count"
 
     # 8. Docker cleanup
-    if command -v docker >/dev/null 2>&1; then
-        run_cmd docker system prune -f 2>/dev/null
+    if _step docker; then
+        if command -v docker >/dev/null 2>&1; then
+            run_cmd docker system prune -f 2>/dev/null
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
     fi
-    count=$((count+1)); progress_bar "$total" "$count"
 
     # 9. Steam shader cache cleanup
-    if [ -d "$HOME/.steam/steam/steamapps" ]; then
-        if [ "$DRY_RUN" -eq 0 ]; then
-            rm -rf "$HOME/.steam/steam/steamapps/shadercache/"* 2>/dev/null
-            rm -rf "$HOME/.steam/steam/steamapps/compatdata/"* 2>/dev/null
-        else
-            log_msg INFO "[DRY-RUN] Would clean Steam shader/compat cache"
-        fi
-    fi
-    count=$((count+1)); progress_bar "$total" "$count"
-
-    # 10. Clean temporary files
-    log_msg INFO "Cleaning temporary files in /tmp and /var/tmp..."
-    if [ "$DRY_RUN" -eq 0 ]; then
-        collect_files "/tmp"
-        local tmp1=("${_collected_files[@]}")
-        collect_files "/var/tmp"
-        local tmp2=("${_collected_files[@]}")
-        local tmp_files=("${tmp1[@]}" "${tmp2[@]}")
-        local total_tmp=${#tmp_files[@]}
-
-        for file in "${tmp_files[@]}"; do
-            if command -v lsof >/dev/null 2>&1; then
-                lsof "$file" >/dev/null 2>&1 || rm -f "$file" 2>/dev/null
-            elif command -v fuser >/dev/null 2>&1; then
-                fuser "$file" >/dev/null 2>&1 || rm -f "$file" 2>/dev/null
+    if _step steam; then
+        if [ -d "$HOME/.steam/steam/steamapps" ]; then
+            # shadercache only. compatdata sits next to it and holds the
+            # Proton prefixes: unless a game uses Steam Cloud, its saves
+            # are in there. Releases up to 2.0.0 deleted it as "compat
+            # cache" -- it is not cache, and it is never deleted here.
+            if [ "$DRY_RUN" -eq 0 ]; then
+                rm -rf "$HOME/.steam/steam/steamapps/shadercache/"* 2>/dev/null
             else
-                rm -f "$file" 2>/dev/null
+                log_msg INFO "[DRY-RUN] Would clean the Steam shader cache"
             fi
-        done
-        [ "$total_tmp" -gt 0 ] && progress_bar "$total_tmp" "$total_tmp"
-    else
-        log_msg INFO "[DRY-RUN] Would clean temporary files in /tmp and /var/tmp"
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
     fi
-    count=$((count+1)); progress_bar "$total" "$count"
+
+    # 10. Leftovers: our own archives, and the .bak/.log debris any tool
+    # leaves behind. Everything here is age-gated at 30 days except the
+    # archive pruning, which is count-gated -- a file nothing has written
+    # to in a month is not in use by anything, which is what makes
+    # sweeping *.log safe at all.
+    #
+    # Deliberately NOT touched: /var/log. Those belong to services that
+    # hold them open, and the journal has its own step above.
+    if _step leftovers; then
+        local pruned=0 swept=0 f pattern old
+
+        # Keep the two most recent of each archive kind; anything older is
+        # superseded by definition -- the newest is what you would restore.
+        for pattern in '*.confs.*.zip' 'pre_restore_*.zip'; do
+            while IFS= read -r old; do
+                [ -n "$old" ] || continue
+                [ "$DRY_RUN" -eq 0 ] && rm -f "$old" 2>/dev/null
+                pruned=$((pruned + 1))
+            done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name "$pattern" \
+                        -printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n +3 \
+                        | cut -d' ' -f2-)
+        done
+
+        # $HOME's top level: a stray .log or .bak there is debris, never a
+        # program's working file. ~/.cache is debris by definition. Under
+        # ~/.config and ~/.local/share only .bak is swept -- a .log there
+        # may well be an application's real log.
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ "$DRY_RUN" -eq 0 ] && rm -f "$f" 2>/dev/null
+            swept=$((swept + 1))
+        done < <(
+            {
+                find "$USER_DIR" -maxdepth 1 -type f \
+                    \( -name '*.log' -o -name '*.bak' -o -name '*.bak.*' \) -mtime +30
+                find "$USER_DIR/.cache" -type f \
+                    \( -name '*.log' -o -name '*.bak' -o -name '*.bak.*' \) -mtime +30
+                find "$USER_DIR/.config" "$USER_DIR/.local/share" -type f \
+                    \( -name '*.bak' -o -name '*.bak.*' \) -mtime +30
+            } 2>/dev/null
+        )
+
+        if [ "$DRY_RUN" -eq 0 ]; then
+            log_msg INFO "Leftovers: pruned ${pruned} old archive(s), swept ${swept} stale .log/.bak"
+        else
+            log_msg INFO "[DRY-RUN] Would prune ${pruned} old archive(s) and sweep ${swept} stale .log/.bak"
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
+
+    # 11. Clean temporary files
+    if _step tmp; then
+        log_msg INFO "Cleaning temporary files in /tmp and /var/tmp..."
+        if [ "$DRY_RUN" -eq 0 ]; then
+            collect_files "/tmp"
+            local tmp1=("${_collected_files[@]}")
+            collect_files "/var/tmp"
+            local tmp2=("${_collected_files[@]}")
+            local tmp_files=("${tmp1[@]}" "${tmp2[@]}")
+            local total_tmp=${#tmp_files[@]}
+
+            for file in "${tmp_files[@]}"; do
+                if command -v lsof >/dev/null 2>&1; then
+                    lsof "$file" >/dev/null 2>&1 || rm -f "$file" 2>/dev/null
+                elif command -v fuser >/dev/null 2>&1; then
+                    fuser "$file" >/dev/null 2>&1 || rm -f "$file" 2>/dev/null
+                else
+                    rm -f "$file" 2>/dev/null
+                fi
+            done
+            [ "$total_tmp" -gt 0 ] && progress_bar "$total_tmp" "$total_tmp"
+        else
+            log_msg INFO "[DRY-RUN] Would clean temporary files in /tmp and /var/tmp"
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
 
     # Report disk space freed
     local space_after freed_kb
@@ -606,7 +752,7 @@ full_cleanup() {
         log_msg INFO "Cleanup complete (no measurable space freed or running in dry-run mode)."
     fi
 
-    log_msg INFO "Full cleanup completed."
+    log_msg INFO "${CLEANUP_SCOPE^} cleanup completed."
 }
 
 # Backward-compatible alias
@@ -614,30 +760,53 @@ limpeza_completa() { full_cleanup "$@"; }
 
 # --- Schedule cleanup at boot ---
 
+# Releases up to 2.0.0 put the @reboot line in the *invoking user's*
+# crontab, where the job runs unprivileged with no terminal -- see
+# check_root for what that costs. Drop that entry wherever it is still
+# installed, whatever name the script was carrying when it wrote it: a
+# fork under a different filename is the same defect.
+_LEGACY_CRON_RE='BRCS\.sh|brcs-cleanup|stoa-maintain'
+
+_unschedule_user_crontab() {
+    command -v crontab >/dev/null 2>&1 || return 0
+    # Read the crontab once. Reading it twice -- once to test, once to
+    # rewrite -- would drop anything added in between, and it puts the
+    # read on the same pipeline as the write.
+    local current
+    current=$(crontab -l 2>/dev/null) || return 0
+    printf '%s\n' "$current" | grep -qE "$_LEGACY_CRON_RE" || return 0
+    printf '%s\n' "$current" | grep -vE "$_LEGACY_CRON_RE" | crontab -
+    log_msg INFO "Removed the legacy user-crontab cleanup entry (it could not authenticate)."
+}
+
 schedule_cleanup() {
     log_msg INFO "Scheduling cleanup at boot..."
     local script_path
     script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 
-    if command -v crontab >/dev/null 2>&1; then
-        local CRON_CMD="@reboot bash $script_path --cleanup"
-        (crontab -l 2>/dev/null | grep -v "$script_path" ; echo "$CRON_CMD") | crontab -
-        log_msg INFO "Cleanup scheduled at boot via crontab."
-    elif command -v systemctl >/dev/null 2>&1; then
-        local unit_dir="/etc/systemd/system"
-        check_root
+    _unschedule_user_crontab
 
-        sudo tee "$unit_dir/brcs-cleanup.service" >/dev/null <<EOF
+    # systemd first, deliberately. The cleanup runs the package manager and
+    # journalctl: it needs root. A @reboot line in this user's crontab runs
+    # it unprivileged with nothing to prompt on, so every sudo inside fails
+    # as a PAM "conversation failed" and pam_faillock locks the account --
+    # at the login screen, on the next boot. The systemd unit runs as root,
+    # so nothing has to ask.
+    if command -v systemctl >/dev/null 2>&1; then
+        local unit_dir="/etc/systemd/system"
+        check_root || return 1
+
+        sudo tee "$unit_dir/brcs-cleanup.service" >/dev/null <<SVCEOF
 [Unit]
 Description=BRCS system cleanup at boot
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $script_path --cleanup
-EOF
+ExecStart=/bin/bash $script_path --cleanup --unattended
+SVCEOF
 
-        sudo tee "$unit_dir/brcs-cleanup.timer" >/dev/null <<EOF
+        sudo tee "$unit_dir/brcs-cleanup.timer" >/dev/null <<TMREOF
 [Unit]
 Description=Run BRCS cleanup on boot
 
@@ -646,13 +815,22 @@ OnBootSec=2min
 
 [Install]
 WantedBy=timers.target
-EOF
+TMREOF
 
         sudo systemctl daemon-reload
         sudo systemctl enable brcs-cleanup.timer
         log_msg INFO "Cleanup scheduled at boot via systemd timer."
+        log_msg INFO "To undo: sudo systemctl disable --now brcs-cleanup.timer"
+    elif command -v crontab >/dev/null 2>&1; then
+        # No systemd: root's crontab, so the job is already privileged and
+        # nothing inside it has to ask for a password.
+        check_root || return 1
+        local CRON_CMD="@reboot bash $script_path --cleanup --unattended"
+        (sudo crontab -l 2>/dev/null | grep -vE "$_LEGACY_CRON_RE" ; echo "$CRON_CMD") \
+            | sudo crontab -
+        log_msg INFO "Cleanup scheduled at boot via root crontab."
     else
-        log_msg ERROR "Neither crontab nor systemctl found. Cannot schedule cleanup."
+        log_msg ERROR "Neither systemctl nor crontab found. Cannot schedule cleanup."
         return 1
     fi
 }
@@ -675,19 +853,46 @@ Options:
   --backup              Backup system and user configurations
   --restore FILE        Restore all configs from backup FILE
   --restore-interactive FILE  Restore configs interactively (choose per file)
-  --cleanup             Run full system cleanup
+  --cleanup             Run full system cleanup (11 steps, see below)
+  --unattended          Use with --cleanup: run only the steps that are
+                        safe without a person watching -- package cache,
+                        unused flatpaks, journal, leftovers and temp files.
+                        No upgrade, no package removal, no Steam, no
+                        docker prune, no kernel removal. This is what the
+                        scheduled boot job runs.
   --dry-run             Show what cleanup would do (use with --cleanup)
   --list FILE           List contents of a backup file
-  --schedule            Schedule cleanup to run at boot
+  --schedule            Schedule the unattended cleanup two minutes after
+                        each boot, as a root-owned systemd timer
+                        (undo: sudo systemctl disable --now brcs-cleanup.timer)
   --help, -h            Show this help message
+
+Cleanup steps, in order:
+   1  upgrade every package                     changes what is installed
+   2  trim the package cache
+   3  remove orphaned packages                  changes what is installed
+   4  drop disabled snap revisions
+   5  uninstall unused flatpak runtimes
+   6  vacuum the journal to 7 days / 100M
+   7  remove old kernels                        apt and dnf only
+   8  docker system prune                       drops stopped containers
+   9  clear the Steam shader cache
+  10  leftovers: keep the 2 newest archives of each kind, and sweep
+      .log/.bak older than 30 days from \$HOME, ~/.cache, and (.bak only)
+      ~/.config and ~/.local/share. Never /var/log.
+  11  clear /tmp and /var/tmp, skipping files in use
+
+Steam compatdata is never touched: Proton keeps game saves there.
 
 Examples:
   $(basename "$0")                          # Interactive menu
   $(basename "$0") --backup                 # Backup all configs
   $(basename "$0") --restore backup.zip     # Restore all from backup
   $(basename "$0") --dry-run --cleanup      # Preview cleanup actions
+  $(basename "$0") --cleanup --unattended   # Safe subset only
   $(basename "$0") --list backup.zip        # Show backup contents
 
+Backups are written to: $BACKUP_DIR
 Detected package manager: $PKG_MANAGER
 USAGE
 }
@@ -704,6 +909,7 @@ while [ $# -gt 0 ]; do
         --list)                 ACTION="list"; CLI_FILE="${2:-}"; shift; [ -n "$CLI_FILE" ] && shift ;;
         --schedule)             ACTION="schedule"; shift ;;
         --dry-run)              DRY_RUN=1; shift ;;
+        --unattended)           CLEANUP_SCOPE="safe"; shift ;;
         --help|-h)              show_help; exit 0 ;;
         *)
             echo "Unknown option: $1"
@@ -752,9 +958,10 @@ while true; do
     echo "2) Restore configurations"
     echo "3) Full system cleanup"
     echo "4) Full system cleanup (dry-run)"
-    echo "5) List backup contents"
-    echo "6) Schedule cleanup at boot"
-    echo "7) Exit"
+    echo "5) Safe cleanup only (what the boot job runs)"
+    echo "6) List backup contents"
+    echo "7) Schedule cleanup at boot"
+    echo "8) Exit"
     echo "Package manager: $PKG_MANAGER"
     read -r -p "Choose an option: " option
 
@@ -773,11 +980,12 @@ while true; do
                 *) echo "Returning..." ;;
             esac
             ;;
-        3) DRY_RUN=0; full_cleanup ;;
-        4) DRY_RUN=1; full_cleanup; DRY_RUN=0 ;;
-        5) list_backup_contents ;;
-        6) schedule_cleanup ;;
-        7) echo "Goodbye!"; exit 0 ;;
+        3) DRY_RUN=0; CLEANUP_SCOPE="full"; full_cleanup ;;
+        4) DRY_RUN=1; CLEANUP_SCOPE="full"; full_cleanup; DRY_RUN=0 ;;
+        5) DRY_RUN=0; CLEANUP_SCOPE="safe"; full_cleanup; CLEANUP_SCOPE="full" ;;
+        6) list_backup_contents ;;
+        7) schedule_cleanup ;;
+        8) echo "Goodbye!"; exit 0 ;;
         *) log_msg ERROR "Invalid option." ;;
     esac
 done

@@ -26,18 +26,58 @@ BRCS is an acronym for **B**ackup, **R**estoration, **C**leaner and **S**chedule
 - List backup contents without restoring (`--list`)
 
 ### Cleanup
-- Update and upgrade system packages
-- Clean package manager cache
-- Remove orphaned/unused packages
-- Clean systemd journal logs (vacuum to 7d / 100MB)
-- Remove old kernels (apt, dnf)
-- Clean disabled Snap revisions
-- Remove unused Flatpak runtimes
-- Prune Docker resources
-- Clear Steam shader/compat cache
-- Clean `/tmp` and `/var/tmp` (skips files in use)
-- Reports disk space freed at the end
-- Dry-run mode to preview without making changes
+
+Eleven steps, reporting the disk space freed at the end:
+
+| # | Step | Notes |
+|---|------|-------|
+| 1 | Update and upgrade every package | changes what is installed |
+| 2 | Trim the package manager cache | |
+| 3 | Remove orphaned packages | changes what is installed |
+| 4 | Drop disabled Snap revisions | |
+| 5 | Uninstall unused Flatpak runtimes | |
+| 6 | Vacuum the systemd journal to 7 days / 100 MB | |
+| 7 | Remove old kernels | apt and dnf only |
+| 8 | `docker system prune` | drops stopped containers |
+| 9 | Clear the Steam **shader** cache | |
+| 10 | Leftovers: keep the 2 newest archives of each kind; sweep `.log`/`.bak` older than 30 days | see below |
+| 11 | Clear `/tmp` and `/var/tmp` | skips files in use |
+
+Step 10 sweeps `.log` and `.bak` from the top level of `$HOME` and from
+`~/.cache`, and `.bak` only from `~/.config` and `~/.local/share` — a
+`.log` under those two may well be an application's real log. `/var/log`
+is never touched: those files belong to services that hold them open, and
+step 6 covers the journal.
+
+Steam `compatdata` is never deleted. It sits next to `shadercache` and
+holds the Proton prefixes, so unless a game uses Steam Cloud its saves
+live in there. Releases up to 2.0.0 wiped it as "compat cache"; 2.1.0
+does not.
+
+- Dry-run mode (`--dry-run`) previews every step without making changes
+- Unattended mode (`--unattended`) runs only steps 2, 5, 6, 10 and 11
+
+### Unattended cleanup and scheduling
+
+`--schedule` installs a **root-owned systemd timer** that runs
+`--cleanup --unattended` two minutes after each boot. To undo it:
+
+```bash
+sudo systemctl disable --now brcs-cleanup.timer
+```
+
+The scheduled job deliberately runs the safe subset: it deletes garbage
+and changes nothing else. No upgrade, no package removal, no kernel
+removal, no `docker system prune`, and no Steam step — a shader cache is
+regenerable, but rebuilding it costs a stuttering first launch per game,
+so wiping it on every boot is worse than useless.
+
+On a host with no systemd the job goes into **root's** crontab, not
+yours. Releases up to 2.0.0 put a `@reboot` line in the invoking user's
+crontab, where it ran unprivileged with no terminal: every `sudo` inside
+became a PAM "conversation failed", `pam_faillock` counted each one, and
+after three the account was locked — at the login screen, on the next
+boot. `--schedule` now removes that entry wherever it finds it.
 
 ### General
 - Full CLI interface for scripting and automation
@@ -45,7 +85,8 @@ BRCS is an acronym for **B**ackup, **R**estoration, **C**leaner and **S**chedule
 - Timestamped color-coded logging (INFO, WARN, ERROR)
 - Terminal progress bar for all operations
 - Signal trapping for safe temp file cleanup
-- Root/sudo check before privileged operations
+- Refuses to run privileged work with no terminal to authenticate on,
+  rather than tripping `pam_faillock` (see *Unattended cleanup* above)
 
 ## Supported Distributions
 
@@ -96,14 +137,15 @@ chmod +x BRCS.sh
 ```
 
 ```
-=== BRCS v2.0.0 - System Maintenance ===
+=== BRCS v2.1.0 - System Maintenance ===
 1) Backup configurations
 2) Restore configurations
 3) Full system cleanup
 4) Full system cleanup (dry-run)
-5) List backup contents
-6) Schedule cleanup at boot
-7) Exit
+5) Safe cleanup only (what the boot job runs)
+6) List backup contents
+7) Schedule cleanup at boot
+8) Exit
 ```
 
 ### CLI (non-interactive)
@@ -127,7 +169,10 @@ chmod +x BRCS.sh
 # Preview cleanup without making changes
 ./BRCS.sh --dry-run --cleanup
 
-# Schedule cleanup at boot
+# Run only the steps that are safe without someone watching
+./BRCS.sh --cleanup --unattended
+
+# Schedule the unattended cleanup at boot (root-owned systemd timer)
 ./BRCS.sh --schedule
 
 # Show help
@@ -136,9 +181,21 @@ chmod +x BRCS.sh
 
 ## Backups
 
-Backup files are saved as: `hostname.confs.YYYYMMDD.zip`
+Backup files are saved to `$HOME` as `hostname.confs.YYYYMMDD.zip`. Set
+`BRCS_BACKUP_DIR` to put them somewhere else:
+
+```bash
+BRCS_BACKUP_DIR=/mnt/backups ./BRCS.sh --backup
+```
+
+Before overwriting anything, a restore first saves what it is about to
+replace, to `pre_restore_YYYYMMDD_HHMMSS.zip` in the same directory.
 
 Logs are saved to: `~/backup_YYYYMMDD.log`
+
+Up to 2.0.0 the archive path was relative, so it landed in whatever
+directory you happened to be standing in and `--list` could not find it
+again. It is anchored from 2.1.0 on.
 
 ## License
 
@@ -146,9 +203,13 @@ This project is licensed under the terms of the [GNU General Public License v3.0
 
 ## Contributing
 
-To run the test suite you need the [Bats](https://github.com/bats-core/bats-core) framework.
-Install it via your package manager (e.g. `sudo apt install bats`) and then execute:
+To run the test suite you need the [Bats](https://github.com/bats-core/bats-core)
+framework and [ShellCheck](https://www.shellcheck.net/). Install them via your
+package manager (e.g. `sudo apt install bats shellcheck`) and then run what CI
+runs:
 
 ```bash
-bats test
+bash -n BRCS.sh
+shellcheck -S warning BRCS.sh test/*.bats
+bats test/
 ```

@@ -25,7 +25,7 @@ EOS
   chmod +x "$STUBS/zip"
 
   export PATH="$STUBS:$PATH"
-  cd "$TMPDIR_BCK"
+  cd "$TMPDIR_BCK" || exit 1
 }
 
 teardown() {
