@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-VERSION="2.1.0"
+VERSION="2.3.0"
 
 # Hostname fallback and date for backup filename
 MY_HOSTNAME="${HOSTNAME:-$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo unknown)}"
@@ -24,6 +24,26 @@ TODAY=$(date +%Y%m%d)
 # be standing in, so a backup taken from one shell was invisible from the
 # next and --list could not find it again.
 BACKUP_DIR="${BRCS_BACKUP_DIR:-$HOME}"
+
+# The scratch directories step 11 sweeps. Overridable so the step can be
+# exercised against a sandbox: it deletes files, and a test suite that
+# points it at the real /tmp is one broken guard away from sweeping the
+# developer's machine.
+BRCS_TMP_DIRS="${BRCS_TMP_DIRS:-/tmp /var/tmp}"
+
+# --- Stale caches ---
+# A cache directory nothing has touched in this long belongs to a program
+# you have stopped using, or one you removed and whose cache outlived it.
+# Age is the only honest signal here: a directory name under ~/.cache
+# rarely matches a binary name, so "is the program still installed" cannot
+# be asked reliably, but "has anything written here since April" can.
+BRCS_STALE_CACHE_DAYS="${BRCS_STALE_CACHE_DAYS:-90}"
+
+# Caches that are regenerable but *expensive* -- model weights, browser
+# binaries, compiler output. Age alone is not reason enough to throw away
+# gigabytes of re-download, so these are kept however old they are. The
+# same reasoning already keeps the Go module cache out of the step above.
+_STALE_CACHE_KEEP=" huggingface torch ms-playwright pre-commit go-build bazel ccache "
 arq="$BACKUP_DIR/$MY_HOSTNAME.confs.$TODAY.zip"
 log="$HOME/backup_$TODAY.log"
 USER_DIR="$HOME"
@@ -38,13 +58,33 @@ DRY_RUN=0
 # the Steam step -- a shader cache is regenerable, but rebuilding it costs
 # a stuttering first launch per game, so wiping it on every boot is worse
 # than useless.
+#
+# "user" is for a machine you do not administer: no sudo at all. Only the
+# steps that touch your own files, plus the per-user variants of the two
+# that have one -- flatpak's user installation and your own journal. The
+# package manager, snap, the kernels and the system journal are simply
+# not yours to clean, so they are skipped rather than attempted; see
+# _explain_user_scope below, which says so once instead of leaving you to
+# wonder why the run got short.
 CLEANUP_SCOPE="full"
 _SAFE_STEPS=" clean flatpak journal leftovers tmp "
+_USER_STEPS=" flatpak journal docker steam usercache stalecache leftovers tmp "
 
 _step() {
-    [ "$CLEANUP_SCOPE" = "full" ] && return 0
-    case "$_SAFE_STEPS" in *" $1 "*) return 0 ;; esac
+    case "$CLEANUP_SCOPE" in
+        full) return 0 ;;
+        safe) case "$_SAFE_STEPS" in *" $1 "*) return 0 ;; esac ;;
+        user) case "$_USER_STEPS" in *" $1 "*) return 0 ;; esac ;;
+    esac
     return 1
+}
+
+# True when this run must not invoke sudo even once.
+_user_scope() { [ "$CLEANUP_SCOPE" = "user" ]; }
+
+_explain_user_scope() {
+    log_msg INFO "Unprivileged run: skipping the package manager, snap, old kernels"
+    log_msg INFO "and the system journal -- those need root. Cleaning your own files."
 }
 
 # --- Helper functions ---
@@ -78,6 +118,7 @@ check_root() {
 
     if ! command -v sudo >/dev/null 2>&1; then
         log_msg ERROR "Needs root and sudo is not installed."
+        log_msg ERROR "To clean only your own files instead: --cleanup --user"
         return 1
     fi
 
@@ -96,6 +137,7 @@ check_root() {
     if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
         log_msg ERROR "Needs root, but there is no terminal to ask for a password."
         log_msg ERROR "Run it as root, or grant this user a NOPASSWD sudoers rule."
+        log_msg ERROR "To clean only your own files instead: --cleanup --user"
         return 1
     fi
     return 0
@@ -132,11 +174,16 @@ _brcs_cleanup() {
 
 # Collect files into an array from find (compatible with bash 3+)
 collect_files() {
-    local dir="$1"
+    local dir="$1" owner="${2:-}"
     _collected_files=()
+    # With an owner, only that user's files. /tmp is shared: without root
+    # someone else's files are not ours to delete, and trying just prints
+    # a permission error per file.
+    local -a pred=(-type f)
+    [ -n "$owner" ] && pred+=(-user "$owner")
     while IFS= read -r -d '' f; do
         _collected_files+=("$f")
-    done < <(find "$dir" -type f -print0 2>/dev/null)
+    done < <(find "$dir" "${pred[@]}" -print0 2>/dev/null)
 }
 
 # Function: Show terminal progress bar with color
@@ -188,7 +235,11 @@ get_repo_patterns() {
 
 # Get disk usage of root filesystem in KB
 get_disk_used_kb() {
-    df / | awk 'NR==2{print $3}'
+    # Measure the filesystem holding what we are about to clean. An
+    # unprivileged run only ever touches $HOME, which on a shared or
+    # managed machine is very often a different mount from / -- reporting
+    # on / there would have said "no measurable space freed" every time.
+    df "${1:-/}" 2>/dev/null | awk 'NR==2{print $3}'
 }
 
 # --- Backup ---
@@ -550,19 +601,29 @@ pkg_autoremove() {
 # --- Full cleanup ---
 
 full_cleanup() {
-    check_root || return 1
+    # An unprivileged run never calls sudo, so there is nothing to
+    # authenticate and nothing for pam_faillock to count.
+    if ! _user_scope; then
+        check_root || return 1
+    fi
     log_msg INFO "Starting ${CLEANUP_SCOPE} cleanup..."
+    _user_scope && _explain_user_scope
 
+    # Only $HOME is touched unprivileged, and it is often its own mount.
+    local measure="/"
+    _user_scope && measure="$HOME"
     local space_before
-    space_before=$(get_disk_used_kb)
+    space_before=$(get_disk_used_kb "$measure")
 
     local steps
-    if [ "$CLEANUP_SCOPE" = "safe" ]; then
-        steps=("clean" "flatpak" "journal" "leftovers" "tmp")
-    else
-        steps=("update" "clean" "autoremove" "snap" "flatpak" "journal" \
-               "kernels" "docker" "steam" "leftovers" "tmp")
-    fi
+    case "$CLEANUP_SCOPE" in
+        safe) steps=("clean" "flatpak" "journal" "leftovers" "tmp") ;;
+        user) steps=("flatpak" "journal" "docker" "steam" "usercache" \
+                     "stalecache" "leftovers" "tmp") ;;
+        *)    steps=("update" "clean" "autoremove" "snap" "flatpak" "journal" \
+                     "kernels" "docker" "steam" "usercache" "stalecache" \
+                     "leftovers" "tmp") ;;
+    esac
     local total=${#steps[@]}
     local count=0
 
@@ -603,7 +664,14 @@ full_cleanup() {
     # 5. Flatpak cleanup
     if _step flatpak; then
         if command -v flatpak >/dev/null 2>&1; then
-            run_cmd flatpak uninstall --unused -y 2>/dev/null
+            if _user_scope; then
+                # --user confines this to the per-user installation. Without
+                # it flatpak targets the system one and raises a polkit
+                # prompt there is nobody to answer.
+                run_cmd flatpak uninstall --user --unused -y 2>/dev/null
+            else
+                run_cmd flatpak uninstall --unused -y 2>/dev/null
+            fi
         fi
         count=$((count+1)); progress_bar "$total" "$count"
     fi
@@ -611,8 +679,14 @@ full_cleanup() {
     # 6. Journal log cleanup
     if _step journal; then
         if command -v journalctl >/dev/null 2>&1; then
-            run_cmd sudo journalctl --vacuum-time=7d 2>/dev/null
-            run_cmd sudo journalctl --vacuum-size=100M 2>/dev/null
+            if _user_scope; then
+                # Your own journal, which you own and may vacuum freely.
+                run_cmd journalctl --user --vacuum-time=7d 2>/dev/null
+                run_cmd journalctl --user --vacuum-size=100M 2>/dev/null
+            else
+                run_cmd sudo journalctl --vacuum-time=7d 2>/dev/null
+                run_cmd sudo journalctl --vacuum-size=100M 2>/dev/null
+            fi
         fi
         count=$((count+1)); progress_bar "$total" "$count"
     fi
@@ -657,6 +731,82 @@ full_cleanup() {
             else
                 log_msg INFO "[DRY-RUN] Would clean the Steam shader cache"
             fi
+        fi
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
+
+    # Regenerable caches under $HOME. Everything here comes back on its
+    # own the next time the tool that made it runs -- the only cost of
+    # deleting it is the time to rebuild. Nothing here is a preference, a
+    # credential or a piece of work, which is why it can go without asking.
+    #
+    # Deliberately NOT here: ~/.cache wholesale (applications keep real
+    # state in there, not just cache), the trash (you may still want those
+    # files back), and the Go module cache (it is regenerable, but it is
+    # gigabytes of re-download, not seconds of rebuild).
+    if _step usercache; then
+        local freed_any=0
+
+        if [ -d "$HOME/.cache/thumbnails" ]; then
+            if [ "$DRY_RUN" -eq 0 ]; then
+                rm -rf "${HOME:?}/.cache/thumbnails/"* 2>/dev/null
+            else
+                log_msg INFO "[DRY-RUN] Would clear the thumbnail cache"
+            fi
+            freed_any=1
+        fi
+
+        if command -v pip >/dev/null 2>&1; then
+            run_cmd pip cache purge >/dev/null 2>&1 && freed_any=1
+        elif command -v pip3 >/dev/null 2>&1; then
+            run_cmd pip3 cache purge >/dev/null 2>&1 && freed_any=1
+        fi
+
+        if command -v npm >/dev/null 2>&1; then
+            run_cmd npm cache clean --force >/dev/null 2>&1 && freed_any=1
+        fi
+
+        if command -v yarn >/dev/null 2>&1; then
+            run_cmd yarn cache clean >/dev/null 2>&1 && freed_any=1
+        fi
+
+        [ "$freed_any" -eq 0 ] && log_msg INFO "No user caches found to clear."
+        count=$((count+1)); progress_bar "$total" "$count"
+    fi
+
+    # Whole caches belonging to programs you no longer use. Distinct from
+    # the step above, which trims the caches of tools you *do* use: this one
+    # removes the directory outright when nothing inside it has been touched
+    # in BRCS_STALE_CACHE_DAYS.
+    if _step stalecache; then
+        local swept_dirs=0 cdir cname csize
+        if [ -d "$HOME/.cache" ]; then
+            while IFS= read -r cdir; do
+                [ -n "$cdir" ] || continue
+                cname=$(basename "$cdir")
+                case "$_STALE_CACHE_KEEP" in *" $cname "*) continue ;; esac
+
+                # A directory's own mtime only moves when entries are added
+                # or removed at its top level -- a cache written deep inside
+                # would look untouched for years. Ask whether anything
+                # anywhere underneath is recent, and stop at the first hit.
+                if find "$cdir" -newermt "-${BRCS_STALE_CACHE_DAYS} days" \
+                        -print -quit 2>/dev/null | grep -q .; then
+                    continue
+                fi
+
+                csize=$(du -sh "$cdir" 2>/dev/null | cut -f1)
+                if [ "$DRY_RUN" -eq 0 ]; then
+                    rm -rf "$cdir" 2>/dev/null
+                    log_msg INFO "Stale cache removed: ~/.cache/$cname (${csize:-?})"
+                else
+                    log_msg INFO "[DRY-RUN] Would remove stale cache: ~/.cache/$cname (${csize:-?})"
+                fi
+                swept_dirs=$((swept_dirs + 1))
+            done < <(find "$HOME/.cache" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+        fi
+        if [ "$swept_dirs" -eq 0 ]; then
+            log_msg INFO "No caches idle for ${BRCS_STALE_CACHE_DAYS}+ days."
         fi
         count=$((count+1)); progress_bar "$total" "$count"
     fi
@@ -713,13 +863,23 @@ full_cleanup() {
 
     # 11. Clean temporary files
     if _step tmp; then
-        log_msg INFO "Cleaning temporary files in /tmp and /var/tmp..."
+        # Unprivileged, only your own files: /tmp is shared, and the rest
+        # is not yours to delete.
+        local tmp_owner=""
+        if _user_scope; then
+            tmp_owner=$(id -un 2>/dev/null)
+            log_msg INFO "Cleaning your own files in ${BRCS_TMP_DIRS}..."
+        else
+            log_msg INFO "Cleaning temporary files in ${BRCS_TMP_DIRS}..."
+        fi
         if [ "$DRY_RUN" -eq 0 ]; then
-            collect_files "/tmp"
-            local tmp1=("${_collected_files[@]}")
-            collect_files "/var/tmp"
-            local tmp2=("${_collected_files[@]}")
-            local tmp_files=("${tmp1[@]}" "${tmp2[@]}")
+            local tmp_files=() tmp_dir
+            # shellcheck disable=SC2086
+            for tmp_dir in $BRCS_TMP_DIRS; do
+                [ -d "$tmp_dir" ] || continue
+                collect_files "$tmp_dir" "$tmp_owner"
+                tmp_files+=("${_collected_files[@]}")
+            done
             local total_tmp=${#tmp_files[@]}
 
             for file in "${tmp_files[@]}"; do
@@ -733,14 +893,14 @@ full_cleanup() {
             done
             [ "$total_tmp" -gt 0 ] && progress_bar "$total_tmp" "$total_tmp"
         else
-            log_msg INFO "[DRY-RUN] Would clean temporary files in /tmp and /var/tmp"
+            log_msg INFO "[DRY-RUN] Would clean temporary files in ${BRCS_TMP_DIRS}"
         fi
         count=$((count+1)); progress_bar "$total" "$count"
     fi
 
     # Report disk space freed
     local space_after freed_kb
-    space_after=$(get_disk_used_kb)
+    space_after=$(get_disk_used_kb "$measure")
     freed_kb=$((space_before - space_after))
     if [ "$freed_kb" -gt 0 ] 2>/dev/null; then
         if command -v numfmt >/dev/null 2>&1; then
@@ -767,24 +927,134 @@ limpeza_completa() { full_cleanup "$@"; }
 # fork under a different filename is the same defect.
 _LEGACY_CRON_RE='BRCS\.sh|brcs-cleanup|stoa-maintain'
 
+# ...but a line scheduling the *unprivileged* cleanup is not that defect.
+# --cleanup --user calls no sudo at all, so there is nothing for it to
+# authenticate and nothing for faillock to count: the user's crontab is
+# exactly where it belongs. Without this exclusion, --schedule --user
+# would delete its own entry on the next run.
+_LEGACY_CRON_KEEP='--user'
+
 _unschedule_user_crontab() {
     command -v crontab >/dev/null 2>&1 || return 0
     # Read the crontab once. Reading it twice -- once to test, once to
     # rewrite -- would drop anything added in between, and it puts the
     # read on the same pipeline as the write.
-    local current
+    local current stale
     current=$(crontab -l 2>/dev/null) || return 0
-    printf '%s\n' "$current" | grep -qE "$_LEGACY_CRON_RE" || return 0
-    printf '%s\n' "$current" | grep -vE "$_LEGACY_CRON_RE" | crontab -
+    stale=$(printf '%s\n' "$current" | grep -E "$_LEGACY_CRON_RE" \
+                | grep -vF -- "$_LEGACY_CRON_KEEP")
+    [ -n "$stale" ] || return 0
+    # Drop the ones that are ours *and* privileged, keep everything else
+    # exactly where it was. awk rather than a second grep: "matches A but
+    # not B" needs a negative lookahead in a regex, which is not portable.
+    printf '%s\n' "$current" | awk -v re="$_LEGACY_CRON_RE" -v keep="$_LEGACY_CRON_KEEP" '
+        $0 ~ re && index($0, keep) == 0 { next }
+        { print }
+    ' | crontab -
     log_msg INFO "Removed the legacy user-crontab cleanup entry (it could not authenticate)."
 }
 
+# Schedule the unprivileged cleanup, with no root anywhere in the path.
+#
+# A systemd --user manager exists only once you have a session, so this
+# cannot key off boot the way the system timer does: it runs a few minutes
+# after you log in, then weekly while you stay logged in. Making it survive
+# logout needs `loginctl enable-linger`, which is a privileged operation --
+# the whole premise here is that you do not have that, so it is mentioned
+# and not attempted.
+_schedule_user_cleanup() {
+    local script_path="$1"
+
+    # `systemctl --user` needs a running user manager; in a container or
+    # over a bare ssh exec there may be none, and it fails confusingly
+    # rather than obviously. Ask first, fall back to cron.
+    if command -v systemctl >/dev/null 2>&1 && \
+       systemctl --user show-environment >/dev/null 2>&1; then
+        local unit_dir="$HOME/.config/systemd/user"
+        mkdir -p "$unit_dir" || return 1
+
+        cat > "$unit_dir/brcs-cleanup.service" <<SVCEOF
+[Unit]
+Description=BRCS unprivileged cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $script_path --cleanup --user
+SVCEOF
+
+        cat > "$unit_dir/brcs-cleanup.timer" <<TMREOF
+[Unit]
+Description=Run the BRCS unprivileged cleanup
+
+[Timer]
+OnStartupSec=5min
+OnUnitActiveSec=1w
+
+[Install]
+WantedBy=timers.target
+TMREOF
+
+        # Report what actually happened. A user manager can answer
+        # show-environment and still refuse to enable a timer, and saying
+        # "scheduled" when nothing was is worse than saying nothing.
+        if systemctl --user daemon-reload 2>/dev/null && \
+           systemctl --user enable --now brcs-cleanup.timer 2>/dev/null; then
+            log_msg INFO "Unprivileged cleanup scheduled via a systemd --user timer."
+            log_msg INFO "It runs 5 minutes after you log in, then weekly."
+            log_msg INFO "To undo: systemctl --user disable --now brcs-cleanup.timer"
+            log_msg INFO "To keep it running when logged out: loginctl enable-linger \$USER (needs an admin)."
+            return 0
+        fi
+
+        # Half-installed units are worse than none: leave nothing behind
+        # for a later daemon-reload to pick up.
+        rm -f "$unit_dir/brcs-cleanup.service" "$unit_dir/brcs-cleanup.timer"
+        log_msg WARN "A systemd --user timer could not be enabled; falling back to cron."
+    fi
+
+    if command -v crontab >/dev/null 2>&1; then
+        # Your own crontab, and here that is the right place: this job
+        # calls no sudo at all, so there is nothing to authenticate and
+        # nothing for pam_faillock to count. That is exactly what made the
+        # privileged version of this line a bug and this one not.
+        local cron_line="@daily bash $script_path --cleanup --user"
+        local current
+        current=$(crontab -l 2>/dev/null)
+        printf '%s\n' "$current" \
+            | grep -vF -- "$script_path --cleanup --user" \
+            | grep -v '^$' \
+            | { cat; printf '%s\n' "$cron_line"; } \
+            | crontab -
+        log_msg INFO "Unprivileged cleanup scheduled daily via your own crontab."
+        log_msg INFO "To undo: crontab -e, and delete the --cleanup --user line."
+        return 0
+    fi
+
+    log_msg ERROR "Neither a systemd user manager nor crontab found. Cannot schedule."
+    return 1
+}
+
 schedule_cleanup() {
-    log_msg INFO "Scheduling cleanup at boot..."
     local script_path
     script_path="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
 
+    if [ "$DRY_RUN" -eq 1 ]; then
+        if _user_scope; then
+            log_msg INFO "[DRY-RUN] Would schedule '--cleanup --user' as a systemd --user timer (or your crontab)."
+        else
+            log_msg INFO "[DRY-RUN] Would schedule '--cleanup --unattended' as a root systemd timer (or root's crontab)."
+        fi
+        return 0
+    fi
+
+    log_msg INFO "Scheduling cleanup..."
+
     _unschedule_user_crontab
+
+    if _user_scope; then
+        _schedule_user_cleanup "$script_path"
+        return $?
+    fi
 
     # systemd first, deliberately. The cleanup runs the package manager and
     # journalctl: it needs root. A @reboot line in this user's crontab runs
@@ -794,7 +1064,10 @@ schedule_cleanup() {
     # so nothing has to ask.
     if command -v systemctl >/dev/null 2>&1; then
         local unit_dir="/etc/systemd/system"
-        check_root || return 1
+        if ! check_root; then
+            log_msg ERROR "To schedule it without root instead: --schedule --user"
+            return 1
+        fi
 
         sudo tee "$unit_dir/brcs-cleanup.service" >/dev/null <<SVCEOF
 [Unit]
@@ -853,18 +1126,28 @@ Options:
   --backup              Backup system and user configurations
   --restore FILE        Restore all configs from backup FILE
   --restore-interactive FILE  Restore configs interactively (choose per file)
-  --cleanup             Run full system cleanup (11 steps, see below)
+  --cleanup             Run full system cleanup (13 steps, see below)
   --unattended          Use with --cleanup: run only the steps that are
                         safe without a person watching -- package cache,
                         unused flatpaks, journal, leftovers and temp files.
                         No upgrade, no package removal, no Steam, no
                         docker prune, no kernel removal. This is what the
                         scheduled boot job runs.
+  --user                Use with --cleanup: never call sudo at all. Runs
+                        only the steps that touch your own files, for a
+                        machine you do not administer. See below.
   --dry-run             Show what cleanup would do (use with --cleanup)
   --list FILE           List contents of a backup file
   --schedule            Schedule the unattended cleanup two minutes after
                         each boot, as a root-owned systemd timer
                         (undo: sudo systemctl disable --now brcs-cleanup.timer)
+  --schedule --user     The same without root: a systemd --user timer that
+                        runs the unprivileged cleanup 5 minutes after you
+                        log in, then weekly. Falls back to your own
+                        crontab, which is safe here precisely because the
+                        job calls no sudo. A --user timer stops when you
+                        log out; loginctl enable-linger changes that, and
+                        needs an admin.
   --help, -h            Show this help message
 
 Cleanup steps, in order:
@@ -877,12 +1160,37 @@ Cleanup steps, in order:
    7  remove old kernels                        apt and dnf only
    8  docker system prune                       drops stopped containers
    9  clear the Steam shader cache
-  10  leftovers: keep the 2 newest archives of each kind, and sweep
+  10  regenerable user caches: thumbnails, pip, npm, yarn
+  11  whole caches idle 90+ days -- programs you stopped using
+  12  leftovers: keep the 2 newest archives of each kind, and sweep
       .log/.bak older than 30 days from \$HOME, ~/.cache, and (.bak only)
       ~/.config and ~/.local/share. Never /var/log.
-  11  clear /tmp and /var/tmp, skipping files in use
+  13  clear /tmp and /var/tmp, skipping files in use
 
 Steam compatdata is never touched: Proton keeps game saves there.
+
+Unprivileged cleanup (--user), for a machine where you have no sudo.
+Runs seven steps, none of which call sudo even once:
+
+   *  unused flatpak runtimes from your *user* installation
+   *  your own journal, vacuumed to 7 days / 100M
+   *  docker system prune, if you are in the docker group
+   *  the Steam shader cache
+   *  regenerable caches: thumbnails, pip, npm, yarn
+   *  whole caches idle 90+ days, as step 11 above
+   *  leftovers, as step 12 above
+   *  your own files in /tmp and /var/tmp -- not other people's
+
+The package manager, snap, old kernels and the system journal are
+skipped: they are not yours to clean without root. Space freed is
+measured on the filesystem holding \$HOME, which is often not /.
+
+Idle caches (step 11) are whole directories under ~/.cache that nothing
+has written to in BRCS_STALE_CACHE_DAYS (default 90) -- a program you
+stopped using, or removed. Age is read from the newest file anywhere
+inside, not the directory's own timestamp. Caches that are expensive
+rather than cheap to rebuild are kept whatever their age: huggingface,
+torch, ms-playwright, pre-commit, go-build, bazel, ccache.
 
 Examples:
   $(basename "$0")                          # Interactive menu
@@ -910,6 +1218,7 @@ while [ $# -gt 0 ]; do
         --schedule)             ACTION="schedule"; shift ;;
         --dry-run)              DRY_RUN=1; shift ;;
         --unattended)           CLEANUP_SCOPE="safe"; shift ;;
+        --user)                 CLEANUP_SCOPE="user"; shift ;;
         --help|-h)              show_help; exit 0 ;;
         *)
             echo "Unknown option: $1"
@@ -959,9 +1268,10 @@ while true; do
     echo "3) Full system cleanup"
     echo "4) Full system cleanup (dry-run)"
     echo "5) Safe cleanup only (what the boot job runs)"
-    echo "6) List backup contents"
-    echo "7) Schedule cleanup at boot"
-    echo "8) Exit"
+    echo "6) Cleanup without sudo (your own files only)"
+    echo "7) List backup contents"
+    echo "8) Schedule cleanup at boot"
+    echo "9) Exit"
     echo "Package manager: $PKG_MANAGER"
     read -r -p "Choose an option: " option
 
@@ -983,9 +1293,10 @@ while true; do
         3) DRY_RUN=0; CLEANUP_SCOPE="full"; full_cleanup ;;
         4) DRY_RUN=1; CLEANUP_SCOPE="full"; full_cleanup; DRY_RUN=0 ;;
         5) DRY_RUN=0; CLEANUP_SCOPE="safe"; full_cleanup; CLEANUP_SCOPE="full" ;;
-        6) list_backup_contents ;;
-        7) schedule_cleanup ;;
-        8) echo "Goodbye!"; exit 0 ;;
+        6) DRY_RUN=0; CLEANUP_SCOPE="user"; full_cleanup; CLEANUP_SCOPE="full" ;;
+        7) list_backup_contents ;;
+        8) schedule_cleanup ;;
+        9) echo "Goodbye!"; exit 0 ;;
         *) log_msg ERROR "Invalid option." ;;
     esac
 done

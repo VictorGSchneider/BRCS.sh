@@ -53,15 +53,38 @@ teardown() {
   [[ "$output" != *"Steam shader cache"* ]]
 }
 
-@test "the progress bar reaches 100% in both scopes" {
-  # The step gate and the steps array are two separate lists; if they
-  # disagree the bar overshoots or stops short. That is the only visible
-  # symptom, so assert on it directly.
-  for flags in "--cleanup --dry-run" "--cleanup --unattended --dry-run"; do
+@test "every scope runs exactly its declared number of steps" {
+  # The step gate (_SAFE_STEPS/_USER_STEPS) and the steps array in
+  # full_cleanup are two separate lists. If they disagree the bar
+  # overshoots 100% or stops short, which is the only visible symptom --
+  # so assert on the count of updates and on the final value, per scope.
+  #
+  # 13 full, 5 unattended, 8 user. Update these when a step is added.
+  for spec in "--cleanup:13" "--cleanup --unattended:5" "--cleanup --user:8"; do
+    flags="${spec%:*}"
+    want="${spec##*:}"
     # shellcheck disable=SC2086
-    last=$(bash "$SCRIPT" $flags 2>&1 | tr '\r' '\n' | grep -oE '[0-9]+%' | tail -1)
+    pcts=$(bash "$SCRIPT" $flags --dry-run </dev/null 2>&1 \
+             | tr '\r' '\n' | grep -oE '[0-9]+%')
+    got=$(printf '%s\n' "$pcts" | grep -c .)
+    last=$(printf '%s\n' "$pcts" | tail -1)
+    [ "$got" = "$want" ] || { echo "$flags ran $got steps, expected $want"; return 1; }
     [ "$last" = "100%" ] || { echo "$flags ended at $last"; return 1; }
   done
+}
+
+@test "--cleanup --user runs the unprivileged scope end to end" {
+  run bash "$SCRIPT" --cleanup --user --dry-run </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Starting user cleanup"* ]]
+  [[ "$output" == *"User cleanup completed"* ]]
+  # It must say why the run is short rather than leave you guessing.
+  [[ "$output" == *"skipping the package manager"* ]]
+  # The per-user variants, not the system ones.
+  [[ "$output" == *"journalctl --user --vacuum-time=7d"* ]]
+  # And none of the steps that need root.
+  [[ "$output" != *"apt-get"* ]]
+  [[ "$output" != *"vacuum-time=7d 2>"* ]]
 }
 
 @test "--cleanup --dry-run runs every step and touches nothing" {
@@ -87,14 +110,4 @@ teardown() {
   [ "$status" -eq 0 ]
   run grep -E "rm -rf.*compatdata" "$SCRIPT"
   [ "$status" -ne 0 ]
-}
-
-@test "the safe step list matches what full_cleanup counts" {
-  # A step present in _SAFE_STEPS but missing from the "safe" steps array
-  # would make the progress bar overshoot 100%.
-  run bash -c 'source "$SCRIPT" >/dev/null
-    declared=$(echo $_SAFE_STEPS)
-    counted=$(sed -n "s/^        steps=(\(.*\))$/\1/p" "$SCRIPT" | head -1 | tr -d \" )
-    [ "$declared" = "$counted" ] || { echo "declared=[$declared] counted=[$counted]"; exit 1; }'
-  [ "$status" -eq 0 ]
 }
