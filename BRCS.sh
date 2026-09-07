@@ -1055,7 +1055,10 @@ schedule_cleanup() {
     # so nothing has to ask.
     if command -v systemctl >/dev/null 2>&1; then
         local unit_dir="/etc/systemd/system"
-        check_root || return 1
+        if ! check_root; then
+            log_msg ERROR "To schedule it without root instead: --schedule --user"
+            return 1
+        fi
 
         sudo tee "$unit_dir/brcs-cleanup.service" >/dev/null <<SVCEOF
 [Unit]
