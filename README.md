@@ -40,10 +40,17 @@ Eleven steps, reporting the disk space freed at the end:
 | 7 | Remove old kernels | apt and dnf only |
 | 8 | `docker system prune` | drops stopped containers |
 | 9 | Clear the Steam **shader** cache | |
-| 10 | Leftovers: keep the 2 newest archives of each kind; sweep `.log`/`.bak` older than 30 days | see below |
-| 11 | Clear `/tmp` and `/var/tmp` | skips files in use |
+| 10 | Regenerable user caches: thumbnails, pip, npm, yarn | see below |
+| 11 | Leftovers: keep the 2 newest archives of each kind; sweep `.log`/`.bak` older than 30 days | see below |
+| 12 | Clear `/tmp` and `/var/tmp` | skips files in use |
 
-Step 10 sweeps `.log` and `.bak` from the top level of `$HOME` and from
+Step 10 clears only caches that come back on their own — the cost of
+deleting them is the time to rebuild, nothing more. It deliberately does
+**not** clear `~/.cache` wholesale (applications keep real state there,
+not just cache), the trash (you may still want those files), or the Go
+module cache (regenerable, but gigabytes of re-download).
+
+Step 11 sweeps `.log` and `.bak` from the top level of `$HOME` and from
 `~/.cache`, and `.bak` only from `~/.config` and `~/.local/share` — a
 `.log` under those two may well be an application's real log. `/var/log`
 is never touched: those files belong to services that hold them open, and
@@ -55,7 +62,42 @@ live in there. Releases up to 2.0.0 wiped it as "compat cache"; 2.1.0
 does not.
 
 - Dry-run mode (`--dry-run`) previews every step without making changes
-- Unattended mode (`--unattended`) runs only steps 2, 5, 6, 10 and 11
+- Unattended mode (`--unattended`) runs only steps 2, 5, 6, 11 and 12
+- User mode (`--user`) never calls sudo at all — see below
+
+### Cleanup without sudo (`--user`)
+
+For a machine you do not administer — a work laptop, a shared server, a
+university cluster. It runs **seven steps and never invokes sudo once**:
+
+| Step | Unprivileged because |
+|------|----------------------|
+| Unused flatpak runtimes | `--user` confines it to your per-user installation |
+| Your journal, vacuumed to 7d / 100M | `journalctl --user` — your own journal |
+| `docker system prune` | needs no sudo if you are in the `docker` group |
+| Steam shader cache | lives in `$HOME` |
+| Regenerable caches (thumbnails, pip, npm, yarn) | live in `$HOME` |
+| Leftovers | lives in `$HOME` |
+| `/tmp` and `/var/tmp` | **restricted to files you own** — the rest is not yours to delete |
+
+```bash
+./BRCS.sh --cleanup --user
+./BRCS.sh --cleanup --user --dry-run    # preview first
+```
+
+The package manager, snap, old kernels and the system journal are skipped
+rather than attempted: they cannot be cleaned without root. The run says
+so once at the start, so a short run is never a mystery.
+
+Space freed is measured on the filesystem holding `$HOME`, not `/` — on a
+managed machine those are very often different mounts, and measuring `/`
+would report "no measurable space freed" every time.
+
+If you run a privileged mode on a machine with no sudo, the error points
+you here.
+
+Set `BRCS_TMP_DIRS` to change which scratch directories step 12 sweeps
+(default `/tmp /var/tmp`).
 
 ### Unattended cleanup and scheduling
 
@@ -137,15 +179,16 @@ chmod +x BRCS.sh
 ```
 
 ```
-=== BRCS v2.1.0 - System Maintenance ===
+=== BRCS v2.2.0 - System Maintenance ===
 1) Backup configurations
 2) Restore configurations
 3) Full system cleanup
 4) Full system cleanup (dry-run)
 5) Safe cleanup only (what the boot job runs)
-6) List backup contents
-7) Schedule cleanup at boot
-8) Exit
+6) Cleanup without sudo (your own files only)
+7) List backup contents
+8) Schedule cleanup at boot
+9) Exit
 ```
 
 ### CLI (non-interactive)
@@ -171,6 +214,9 @@ chmod +x BRCS.sh
 
 # Run only the steps that are safe without someone watching
 ./BRCS.sh --cleanup --unattended
+
+# Clean without sudo, on a machine where you have no permission
+./BRCS.sh --cleanup --user
 
 # Schedule the unattended cleanup at boot (root-owned systemd timer)
 ./BRCS.sh --schedule
