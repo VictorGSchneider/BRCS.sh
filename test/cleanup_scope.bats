@@ -59,8 +59,8 @@ teardown() {
   # overshoots 100% or stops short, which is the only visible symptom --
   # so assert on the count of updates and on the final value, per scope.
   #
-  # 12 full, 5 unattended, 7 user. Update these when a step is added.
-  for spec in "--cleanup:12" "--cleanup --unattended:5" "--cleanup --user:7"; do
+  # 13 full, 5 unattended, 8 user. Update these when a step is added.
+  for spec in "--cleanup:13" "--cleanup --unattended:5" "--cleanup --user:8"; do
     flags="${spec%:*}"
     want="${spec##*:}"
     # shellcheck disable=SC2086

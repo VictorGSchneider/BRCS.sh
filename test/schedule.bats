@@ -95,15 +95,63 @@ teardown() {
   [ ! -s "$USER_CRONTAB" ]
 }
 
-@test "the source never pipes a scheduled job into the user's crontab" {
-  # Writing to a bare `crontab -` (as opposed to `sudo crontab -`) installs
-  # an unprivileged job. The one legitimate use is the reverse: a `grep -v`
-  # filter that only ever removes lines. Any other bare write is a bug.
+@test "the source never schedules a privileged job in the user's crontab" {
+  # The hazard is scheduling a job that will need sudo with no terminal to
+  # authenticate on. The tell is a cron schedule token reaching a bare
+  # `crontab -`. A pure filter pipeline emits no schedule, and a job that
+  # is explicitly --user needs no privileges, so neither is the bug.
   while IFS= read -r line; do
     case "$line" in
-      *"sudo crontab -"*) continue ;;
-      *"grep -v"*)        continue ;;
-      *) echo "unprivileged crontab write: $line"; return 1 ;;
+      *"sudo crontab -"*) continue ;;   # root's crontab is already privileged
+      *"--user"*)         continue ;;   # an unprivileged job; nothing to auth
     esac
-  done < <(grep -nE "\|[[:space:]]*crontab[[:space:]]+-[[:space:]]*$" "$SCRIPT")
+    case "$line" in
+      *@reboot*|*@daily*|*@weekly*|*@hourly*|*@monthly*|*CRON_CMD*|*cron_line*)
+        echo "schedules a privileged job in the user crontab: $line"; return 1 ;;
+    esac
+  done < <(grep -nE "\\|[[:space:]]*crontab[[:space:]]+-[[:space:]]*$" "$SCRIPT")
+}
+
+@test "_unschedule_user_crontab keeps a legitimate --user entry" {
+  # --schedule --user writes one of these. The legacy sweep runs on every
+  # schedule_cleanup, and matching on the filename alone would delete the
+  # entry the previous run just created.
+  printf '@daily bash /home/me/BRCS.sh --cleanup --user\n@reboot bash /home/me/BRCS.sh --cleanup\n' > "$USER_CRONTAB"
+  run bash -c 'source "$SCRIPT" >/dev/null; _unschedule_user_crontab'
+  [ "$status" -eq 0 ]
+  grep -q -- "--cleanup --user" "$USER_CRONTAB"
+  run grep -q "cleanup$" "$USER_CRONTAB"
+  [ "$status" -ne 0 ]
+}
+
+@test "_unschedule_user_crontab preserves the order of what it keeps" {
+  printf 'a /one\n@reboot bash /home/me/BRCS.sh --cleanup\nb /two\n' > "$USER_CRONTAB"
+  run bash -c 'source "$SCRIPT" >/dev/null; _unschedule_user_crontab'
+  [ "$status" -eq 0 ]
+  [ "$(sed -n 1p "$USER_CRONTAB")" = "a /one" ]
+  [ "$(sed -n 2p "$USER_CRONTAB")" = "b /two" ]
+}
+
+@test "--schedule --user falls back to the user's own crontab" {
+  # No systemd user manager in this environment, so the cron path is taken.
+  run bash "$SCRIPT" --schedule --user </dev/null
+  [ "$status" -eq 0 ]
+  grep -q -- "--cleanup --user" "$USER_CRONTAB"
+  # It must never reach for root here.
+  [ ! -s "$ROOT_CRONTAB" ]
+}
+
+@test "--schedule --user is idempotent" {
+  bash "$SCRIPT" --schedule --user </dev/null >/dev/null 2>&1
+  bash "$SCRIPT" --schedule --user </dev/null >/dev/null 2>&1
+  [ "$(grep -c -- "--cleanup --user" "$USER_CRONTAB")" -eq 1 ]
+}
+
+@test "--schedule --dry-run changes nothing" {
+  : > "$USER_CRONTAB"
+  run bash "$SCRIPT" --schedule --user --dry-run </dev/null
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[DRY-RUN]"* ]]
+  [ ! -s "$USER_CRONTAB" ]
+  [ ! -s "$ROOT_CRONTAB" ]
 }
